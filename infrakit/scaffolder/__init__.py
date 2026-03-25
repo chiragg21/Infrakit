@@ -1,0 +1,1 @@
+"""infrakit.scaffolder — project scaffolding utilities."""

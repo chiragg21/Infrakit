@@ -12,3 +12,6 @@ wheels/
 **/sample_usage.py
 **/.pytest_cache/
 test_time_cli.py
+test_deps.py
+uv.lock
+new_requirements.txt

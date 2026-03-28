@@ -46,7 +46,7 @@ class LicenseInfo:
     package: str
     version: str
     license: str
-    compatible: Optional[bool] = None   # None = unknown
+    compatible: Optional[bool] = None
     notes: str = ""
 
 
@@ -63,34 +63,32 @@ class HealthReport:
 # ---------------------------------------------------------------------------
 
 def _norm(name: str) -> str:
-    """Normalise package name: lowercase, underscores → hyphens."""
+    """Normalise package name: lowercase, underscores -> hyphens."""
     return name.lower().replace("_", "-")
 
 
 # ---------------------------------------------------------------------------
 # Installed package versions
+# Handles both classic pip venvs and uv-managed venvs (where pip itself is
+# not installed and importlib.metadata may return an incomplete picture).
 # ---------------------------------------------------------------------------
-
-def get_installed_version(package: str) -> Optional[str]:
-    """
-    Return the installed version of a package, or None if not found.
-    Tries the exact name first, then the normalised form (lower + hyphens).
-    """
-    for candidate in (package, _norm(package)):
-        try:
-            return importlib.metadata.version(candidate)
-        except importlib.metadata.PackageNotFoundError:
-            pass
-    return None
-
 
 def get_all_installed() -> dict[str, str]:
     """
-    Return dict of normalised_package_name → version for every installed dist.
-    Iterates importlib.metadata.distributions() which works on all platforms
-    and Python 3.8+.
+    Return dict of normalised_package_name -> version for every installed dist.
+
+    Strategy (tried in order):
+      1. importlib.metadata.distributions() -- fast, works when packages are
+         on sys.path (standard pip venvs, system Python)
+      2. ``uv pip list --format=json`` -- covers uv-managed venvs where pip
+         itself may not be installed and importlib.metadata returns nothing
+      3. ``python -m pip list --format=json`` -- classic fallback
+
+    Returns an empty dict only if all three fail.
     """
     result: dict[str, str] = {}
+
+    # 1. importlib.metadata
     try:
         for dist in importlib.metadata.distributions():
             try:
@@ -103,7 +101,46 @@ def get_all_installed() -> dict[str, str]:
                 continue
     except Exception:
         pass
+
+    if result:
+        return result
+
+    # 2 & 3: subprocess fallbacks
+    for cmd in (
+        ["uv", "pip", "list", "--format=json"],
+        [sys.executable, "-m", "pip", "list", "--format=json"],
+    ):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if proc.returncode == 0 and proc.stdout.strip():
+                for entry in json.loads(proc.stdout):
+                    n = entry.get("name", "")
+                    v = entry.get("version", "")
+                    if n and v:
+                        result[_norm(n)] = v
+                if result:
+                    return result
+        except Exception:
+            continue
+
     return result
+
+
+def get_installed_version(package: str) -> Optional[str]:
+    """
+    Return the installed version of a package, or None if not found.
+    Fast path via importlib.metadata; falls back to get_all_installed()
+    to handle uv venvs where importlib.metadata may be incomplete.
+    """
+    # Fast path
+    for candidate in (package, _norm(package)):
+        try:
+            return importlib.metadata.version(candidate)
+        except importlib.metadata.PackageNotFoundError:
+            pass
+
+    # Slow path (handles uv-managed venvs)
+    return get_all_installed().get(_norm(package))
 
 
 # ---------------------------------------------------------------------------
@@ -127,17 +164,15 @@ def _fetch_pypi_latest(package: str, timeout: int = 8) -> Optional[str]:
 def _version_is_older(current: str, latest: str) -> bool:
     """
     Return True if current < latest.
-    Uses packaging.version.Version when available; falls back to a
-    pure-stdlib numeric tuple comparison so it never raises.
+    Uses packaging.version when available; falls back to pure-stdlib
+    numeric tuple comparison.
     """
-    # packaging is often already installed (pip depends on it)
     try:
         from packaging.version import Version  # type: ignore
         return Version(current) < Version(latest)
     except Exception:
         pass
 
-    # Pure-stdlib fallback: compare numeric segments only
     def _segments(v: str) -> tuple:
         parts = []
         for seg in v.split("."):
@@ -156,27 +191,18 @@ def _version_is_older(current: str, latest: str) -> bool:
         return current != latest
 
 
-def check_outdated(
-    packages: list[str],
-    workers: int = 10,
-) -> list[OutdatedPackage]:
-    """
-    Check PyPI for the latest version of each package.
-    Returns a list of OutdatedPackage for every package checked.
-    """
+def check_outdated(packages: list[str], workers: int = 10) -> list[OutdatedPackage]:
+    """Check PyPI for the latest version of each package."""
     installed = get_all_installed()
 
     def _check(pkg: str) -> OutdatedPackage:
         norm = _norm(pkg)
         current = installed.get(norm)
-
         if current is None:
             return OutdatedPackage(pkg, "not installed", "unknown", "not-installed")
-
         latest = _fetch_pypi_latest(pkg)
         if latest is None:
             return OutdatedPackage(pkg, current, "unknown", "unknown")
-
         status = "outdated" if _version_is_older(current, latest) else "up-to-date"
         return OutdatedPackage(pkg, current, latest, status)
 
@@ -203,31 +229,25 @@ def _parse_pip_audit_json(raw: str) -> list[Vulnerability]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return vulns
-
     for entry in data:
         pkg_name = entry.get("name", "")
         pkg_ver = entry.get("version", "")
         for v in entry.get("vulns", []):
             fix_vers = v.get("fix_versions", [])
-            fix_str = ", ".join(fix_vers) if fix_vers else "no fix available"
             vulns.append(Vulnerability(
                 package=pkg_name,
                 installed_version=pkg_ver,
                 vuln_id=v.get("id", ""),
                 description=v.get("description", ""),
-                fix_version=fix_str,
+                fix_version=", ".join(fix_vers) if fix_vers else "no fix available",
             ))
-
     return vulns
 
 
 def check_vulnerabilities(
     packages: Optional[list[str]] = None,
 ) -> tuple[list[Vulnerability], Optional[str]]:
-    """
-    Run pip-audit and return (vulnerabilities, error_message).
-    pip-audit must be installed: pip install pip-audit
-    """
+    """Run pip-audit and return (vulnerabilities, error_message)."""
     try:
         chk = subprocess.run(
             [sys.executable, "-m", "pip_audit", "--version"],
@@ -241,18 +261,13 @@ def check_vulnerabilities(
         return [], "pip-audit version check timed out"
 
     cmd = [sys.executable, "-m", "pip_audit", "--format=json", "--progress-spinner=off"]
-
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        output = proc.stdout or proc.stderr
-        vulns = _parse_pip_audit_json(output)
-
+        vulns = _parse_pip_audit_json(proc.stdout or proc.stderr)
         if packages:
             pkg_lower = {_norm(p) for p in packages}
             vulns = [v for v in vulns if _norm(v.package) in pkg_lower]
-
         return vulns, None
-
     except subprocess.TimeoutExpired:
         return [], "pip-audit timed out after 120s"
     except Exception as exc:
@@ -293,7 +308,6 @@ def _normalise_license(raw: str) -> str:
 
 
 def _get_package_license(package: str) -> tuple[str, str]:
-    """Return (license_string, version) for an installed package."""
     for candidate in (package, _norm(package)):
         try:
             meta = importlib.metadata.metadata(candidate)
@@ -311,18 +325,12 @@ def _get_package_license(package: str) -> tuple[str, str]:
 
 
 def check_licenses(packages: list[str]) -> list[LicenseInfo]:
-    """Return license information for each package."""
     results: list[LicenseInfo] = []
     for pkg in packages:
         lic, ver = _get_package_license(pkg)
         norm = _normalise_license(lic)
-        compatible, notes = _LICENSE_NOTES.get(
-            norm, (None, "Unknown license — review manually")
-        )
-        results.append(LicenseInfo(
-            package=pkg, version=ver, license=lic,
-            compatible=compatible, notes=notes,
-        ))
+        compatible, notes = _LICENSE_NOTES.get(norm, (None, "Unknown license — review manually"))
+        results.append(LicenseInfo(package=pkg, version=ver, license=lic, compatible=compatible, notes=notes))
     return sorted(results, key=lambda x: (x.compatible is not False, x.package.lower()))
 
 

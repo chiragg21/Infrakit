@@ -18,3 +18,4 @@ new_requirements.txt
 .env
 config.*
 testing.ipynb
+api_key_dir

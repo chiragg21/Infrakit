@@ -15,3 +15,6 @@ test_time_cli.py
 test_deps.py
 uv.lock
 new_requirements.txt
+.env
+config.*
+testing.ipynb

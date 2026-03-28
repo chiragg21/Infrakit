@@ -16,6 +16,7 @@ from infrakit.cli.commands.module import module_app
 from infrakit.cli.commands.init   import cmd_init
 from infrakit.cli.commands.time import time_app
 from infrakit.cli.commands.deps import deps_app
+from infrakit.cli.commands.llm import app as llm_app
 
 app = typer.Typer(
     name="infrakit",
@@ -29,6 +30,7 @@ app.add_typer(logger_app, name="logger")
 app.add_typer(module_app, name="module")
 app.add_typer(time_app, name="time")
 app.add_typer(deps_app, name="deps")
+app.add_typer(llm_app, name="llm")
 app.command("init")(cmd_init)
 
 

@@ -1,7 +1,7 @@
 [project]
 name = "infrakit"
 version = "0.1.0"
-description = "Add your description here"
+description = "A comprehensive Python developer infrastructure toolkit"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -30,3 +30,10 @@ build-backend = "hatchling.build"
 [project.scripts]
 infrakit = "infrakit.cli.main:main"
 ik       = "infrakit.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/chiragg21/infrakit"
+Repository = "https://github.com/chiragg21/infrakit"
+
+[tool.hatch.build.targets.wheel]
+packages = ["infrakit"]

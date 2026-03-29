@@ -12,7 +12,6 @@ Supported models (default): gpt-4o-mini
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, Optional, Type
 
@@ -49,20 +48,17 @@ class OpenAIProvider(BaseProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         """Async generate using openai.AsyncOpenAI."""
-        from openai import AsyncOpenAI, APIStatusError
+        from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=api_key)
         messages = self._build_messages(prompt)
         t0 = time.perf_counter()
 
-        try:
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                **kwargs,
-            )
-        except APIStatusError as exc:
-            raise exc  # let client.py classify (quota vs transient)
+        response = await client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            **kwargs,
+        )
 
         latency_ms = (time.perf_counter() - t0) * 1000
         return self._build_response(response, latency_ms, response_model, schema_retries, api_key)
@@ -75,10 +71,28 @@ class OpenAIProvider(BaseProvider):
         schema_retries: int = 2,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Sync generate — runs the async method in a new event loop."""
-        return asyncio.run(
-            self.async_generate(prompt, api_key, response_model, schema_retries, **kwargs)
+        """
+        Sync generate using openai.OpenAI (the blocking SDK client).
+
+        Deliberately does NOT use asyncio.run() so it is safe to call from:
+        - threads (threaded batch mode)
+        - environments with a running event loop (Jupyter, FastAPI, etc.)
+        - Windows, where asyncio loop/thread interactions are more restrictive
+        """
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        messages = self._build_messages(prompt)
+        t0 = time.perf_counter()
+
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            **kwargs,
         )
+
+        latency_ms = (time.perf_counter() - t0) * 1000
+        return self._build_response(response, latency_ms, response_model, schema_retries, api_key)
 
     # ── internal helpers ───────────────────────────────────────────────────
 

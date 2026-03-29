@@ -8,22 +8,20 @@ Commands
     ik llm status
     ik llm status --provider openai
     ik llm status --key sk-abc123
-    ik llm status --json
 
     ik llm quota set --provider openai --key sk-abc123 --rpm 60
-    ik llm quota set --provider gemini  --key AIza-abc1 --daily 1000000 --reset-hour 0
+    ik llm quota set --provider gemini  --key AIza-abc1 --model gemini-2.5-pro --daily 250000
+    ik llm quota set --provider gemini  --key AIza-abc1 --daily 1500000   # default for all models
 
 Connecting to your main CLI
 ----------------------------
-If your main entry point is a Typer app::
+Typer root::
 
-    # infrakit/cli/main.py  (or wherever your root app lives)
     from infrakit.cli.commands.llm import app as llm_app
-    app.add_typer(llm_app, name="llm")
+    root_app.add_typer(llm_app, name="llm")
 
-If your main entry point is a Click group (existing infrakit pattern)::
+Click root::
 
-    # infrakit/cli/main.py
     from infrakit.cli.commands.llm import click_group as llm_group
     cli.add_command(llm_group, name="llm")
 """
@@ -31,7 +29,6 @@ If your main entry point is a Click group (existing infrakit pattern)::
 from __future__ import annotations
 
 import json
-import sys
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -39,21 +36,35 @@ from typing import Optional
 import typer
 from typing_extensions import Annotated
 
-# ── enums for typer choices ────────────────────────────────────────────────
+
+# ── enums ──────────────────────────────────────────────────────────────────
 
 class ProviderChoice(str, Enum):
     openai = "openai"
     gemini = "gemini"
 
 
-# ── shared option types (reused across commands) ───────────────────────────
+# ── shared option types ────────────────────────────────────────────────────
 
 _StorageDirOption = Annotated[
-    Path,
+    Optional[Path],
     typer.Option(
         "--storage-dir", "-d",
-        help="Directory where key state is persisted.",
-        show_default=True,
+        help=(
+            "Directory where key state is persisted. "
+            "Defaults to ~/.infrakit/llm/"
+        ),
+    ),
+]
+
+_QuotaFileOption = Annotated[
+    Optional[Path],
+    typer.Option(
+        "--quota-file", "-q",
+        help=(
+            "Path to quotas.json. "
+            "Defaults to ~/.infrakit/llm/quotas.json if that file exists."
+        ),
     ),
 ]
 
@@ -62,8 +73,7 @@ _KeysFileOption = Annotated[
     typer.Option(
         "--keys-file", "-k",
         help=(
-            "JSON file containing API keys "
-            '(format: {"openai_keys": [...], "gemini_keys": [...]}). '
+            'JSON file containing API keys: {"openai_keys": [...], "gemini_keys": [...]}. '
             "Only needed to register new keys; omit when inspecting persisted state."
         ),
     ),
@@ -71,24 +81,17 @@ _KeysFileOption = Annotated[
 
 _ProviderFilterOption = Annotated[
     Optional[ProviderChoice],
-    typer.Option(
-        "--provider", "-p",
-        help="Filter to a specific provider.",
-        case_sensitive=False,
-    ),
+    typer.Option("--provider", "-p", help="Filter to a specific provider."),
 ]
 
 _KeyFilterOption = Annotated[
     Optional[str],
-    typer.Option(
-        "--key", "-K",
-        help="Filter to a specific key (first 8 chars of the API key).",
-    ),
+    typer.Option("--key", "-K", help="Filter to a specific key (first 8 chars)."),
 ]
+
 
 # ── apps ───────────────────────────────────────────────────────────────────
 
-# root app for this module — add_typer(llm_app, name="llm") in main
 app = typer.Typer(
     name="llm",
     help="Manage infrakit LLM keys, quotas, and usage.",
@@ -96,7 +99,6 @@ app = typer.Typer(
     rich_markup_mode="markdown",
 )
 
-# sub-app for quota subcommands
 quota_app = typer.Typer(
     name="quota",
     help="Manage quota limits for LLM API keys.",
@@ -108,40 +110,37 @@ app.add_typer(quota_app, name="quota")
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-def _load_client(storage_dir: Path, keys_file: Optional[Path]):
-    """
-    Build a minimal LLMClient from CLI args.
-
-    Loads keys from *keys_file* if given; otherwise passes empty lists so
-    the client can still read already-persisted state from *storage_dir*.
-    """
+def _load_client(
+    storage_dir: Optional[Path],
+    quota_file: Optional[Path],
+    keys_file: Optional[Path],
+):
     from infrakit.llm import LLMClient
 
     keys: dict = {"openai_keys": [], "gemini_keys": []}
-
     if keys_file is not None:
         if keys_file.exists():
             with open(keys_file) as f:
                 try:
                     keys = json.load(f)
                 except json.JSONDecodeError as exc:
-                    typer.echo(
-                        f"[error] Could not parse keys file '{keys_file}': {exc}",
-                        err=True,
-                    )
+                    typer.echo(f"[error] Cannot parse keys file: {exc}", err=True)
                     raise typer.Exit(1)
         else:
             typer.echo(f"[warn] Keys file not found: {keys_file}", err=True)
 
     try:
-        return LLMClient(keys=keys, storage_dir=storage_dir)
+        return LLMClient(
+            keys=keys,
+            storage_dir=storage_dir,
+            quota_file=quota_file,
+        )
     except Exception as exc:
         typer.echo(f"[error] Failed to initialise LLMClient: {exc}", err=True)
         raise typer.Exit(1)
 
 
-def _provider_str(provider: Optional[ProviderChoice]) -> Optional[str]:
-    """Unwrap enum to plain string (or None)."""
+def _prov(provider: Optional[ProviderChoice]) -> Optional[str]:
     return provider.value if provider is not None else None
 
 
@@ -149,41 +148,38 @@ def _provider_str(provider: Optional[ProviderChoice]) -> Optional[str]:
 
 @app.command("status")
 def status(
-    storage_dir: _StorageDirOption = Path("./logs"),
-    keys_file: _KeysFileOption = None,
-    provider: _ProviderFilterOption = None,
-    key: _KeyFilterOption = None,
+    storage_dir: _StorageDirOption = None,
+    quota_file:  _QuotaFileOption  = None,
+    keys_file:   _KeysFileOption   = None,
+    provider:    _ProviderFilterOption = None,
+    key:         _KeyFilterOption      = None,
     output_json: Annotated[
         bool,
-        typer.Option(
-            "--json",
-            help="Output raw JSON instead of formatted text.",
-            is_flag=True,
-        ),
+        typer.Option("--json", help="Output raw JSON.", is_flag=True),
     ] = False,
 ):
     """
     Show quota and usage status for LLM API keys.
 
+    Deactivation is tracked per model — a key can have gemini-2.5-pro
+    exhausted while gemini-2.0-flash is still active.
+
     **Examples**
 
         ik llm status
 
-        ik llm status --provider openai
+        ik llm status --provider gemini
 
-        ik llm status --key sk-abc123
+        ik llm status --key AIza-abc1
 
         ik llm status --json
     """
-    client = _load_client(storage_dir, keys_file)
-    prov = _provider_str(provider)
-
-    rows = client.status(provider=prov, key_id=key)
+    client = _load_client(storage_dir, quota_file, keys_file)
+    rows   = client.status(provider=_prov(provider), key_id=key)
 
     if not rows:
         typer.echo(
-            "No keys found. Have you initialised the client with your keys?\n"
-            "Tip: pass --keys-file to register keys on first use."
+            "No keys found. Pass --keys-file to register keys on first use."
         )
         raise typer.Exit(0)
 
@@ -191,7 +187,7 @@ def status(
         typer.echo(json.dumps(rows, indent=2, default=str))
         return
 
-    client.print_status(provider=prov, key_id=key)
+    client.print_status(provider=_prov(provider), key_id=key)
 
 
 # ── ik llm quota set ───────────────────────────────────────────────────────
@@ -200,60 +196,72 @@ def status(
 def quota_set(
     provider: Annotated[
         ProviderChoice,
-        typer.Option(
-            "--provider", "-p",
-            help="Provider the key belongs to.",
-            case_sensitive=False,
-        ),
+        typer.Option("--provider", "-p", help="Provider the key belongs to."),
     ],
     key: Annotated[
         str,
-        typer.Option(
-            "--key", "-K",
-            help="Key ID — first 8 chars of the API key.",
-        ),
+        typer.Option("--key", "-K", help="Key ID (first 8 chars of the API key)."),
     ],
-    storage_dir: _StorageDirOption = Path("./logs"),
-    keys_file: _KeysFileOption = None,
+    storage_dir: _StorageDirOption = None,
+    quota_file:  _QuotaFileOption  = None,
+    keys_file:   _KeysFileOption   = None,
+    model: Annotated[
+        Optional[str],
+        typer.Option(
+            "--model", "-m",
+            help=(
+                "Scope quota to a specific model "
+                "(e.g. gemini-2.5-pro, gpt-4o). "
+                "Omit to set a default that applies to all models on this key."
+            ),
+        ),
+    ] = None,
     rpm: Annotated[
         Optional[int],
-        typer.Option("--rpm", help="Requests-per-minute limit. Omit to leave unchanged."),
+        typer.Option("--rpm", help="Requests-per-minute limit (key-level)."),
     ] = None,
     tpm: Annotated[
         Optional[int],
-        typer.Option("--tpm", help="Tokens-per-minute limit. Omit to leave unchanged."),
+        typer.Option("--tpm", help="Tokens-per-minute limit (model-level)."),
     ] = None,
     daily: Annotated[
         Optional[int],
-        typer.Option("--daily", help="Daily token limit. Omit to leave unchanged."),
+        typer.Option("--daily", help="Daily token limit (model-level)."),
     ] = None,
     reset_hour: Annotated[
         int,
         typer.Option(
             "--reset-hour",
-            help="UTC hour (0–23) at which the daily quota resets.",
-            min=0,
-            max=23,
-            show_default=True,
+            help="UTC hour (0-23) when daily quota resets.",
+            min=0, max=23, show_default=True,
         ),
     ] = 0,
 ):
     """
-    Set quota limits for a specific API key.
+    Set quota limits for a specific API key, optionally scoped to one model.
 
-    Only the options you pass are updated; omitted options are left unchanged.
+    Omitting **--model** sets a default that applies to all models on the key
+    that don't have their own entry.  Providing **--model** overrides only
+    that model.
 
     **Examples**
 
-        ik llm quota set --provider openai --key sk-abc123 --rpm 60 --tpm 90000
+        # default for all models on this key
+        ik llm quota set --provider gemini --key AIza-abc1 --rpm 15 --daily 1500000
 
-        ik llm quota set --provider gemini --key AIza-abc1 --daily 1000000 --reset-hour 0
+        # tighter limit for one expensive model
+        ik llm quota set --provider gemini --key AIza-abc1 \\
+            --model gemini-2.5-pro --daily 250000 --reset-hour 0
+
+        # openai key-level RPM
+        ik llm quota set --provider openai --key sk-abc123 --rpm 60 --tpm 90000
     """
     from infrakit.llm import QuotaConfig
 
-    client = _load_client(storage_dir, keys_file)
+    client = _load_client(storage_dir, quota_file, keys_file)
 
     quota = QuotaConfig(
+        model=model,
         rpm_limit=rpm,
         tpm_limit=tpm,
         daily_token_limit=daily,
@@ -270,27 +278,18 @@ def quota_set(
         )
         raise typer.Exit(1)
 
-    # confirmation output
-    lines = [f"Quota updated for {provider.value} key '{key}...' :"]
-    lines.append(f"  RPM limit   : {rpm    if rpm    is not None else '(unchanged)'}")
-    lines.append(f"  TPM limit   : {tpm    if tpm    is not None else '(unchanged)'}")
-    lines.append(f"  Daily limit : {daily  if daily  is not None else '(unchanged)'}")
+    scope = f"model '{model}'" if model else "all models (default)"
+    lines = [f"Quota updated for {provider.value} key '{key}...' ({scope}):"]
+    lines.append(f"  RPM limit   : {rpm   if rpm   is not None else '(unchanged)'}")
+    lines.append(f"  TPM limit   : {tpm   if tpm   is not None else '(unchanged)'}")
+    lines.append(f"  Daily limit : {daily if daily is not None else '(unchanged)'}")
     lines.append(f"  Reset hour  : {reset_hour:02d}:00 UTC")
     typer.echo("\n".join(lines))
 
 
-# ── click shim — for projects still using a Click root group ──────────────
+# ── click shim ─────────────────────────────────────────────────────────────
 
 def _make_click_group():
-    """
-    Return a Click CommandGroup wrapping this Typer app.
-
-    Usage in a Click-based main CLI::
-
-        from infrakit.cli.commands.llm import click_group
-        cli.add_command(click_group, name="llm")
-    """
     return typer.main.get_command(app)
-
 
 click_group = _make_click_group()

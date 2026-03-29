@@ -47,6 +47,35 @@ from typing import Any, Literal, Optional, Type
 from pydantic import BaseModel
 
 from .batch import async_batch, threaded_batch
+
+
+def _run_async(coro):
+    """
+    Run an async coroutine from sync code, safely.
+
+    - If there is no running event loop (normal script / CLI):
+      use asyncio.run() directly.
+    - If there IS a running loop (Jupyter, FastAPI, nested asyncio):
+      spin up a new loop in a background thread and block until done.
+      This avoids the "asyncio.run() cannot be called from a running
+      event loop" error without requiring the caller to be async.
+    """
+    import concurrent.futures
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None:
+        return asyncio.run(coro)
+
+    # Running inside an existing loop — use a thread with its own loop
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
+        return future.result()
+
+
 from .key_manager import KeyManager
 from .models import BatchResult, LLMResponse, Prompt, Provider, QuotaConfig, RequestMeta
 from .providers.base import BaseProvider
@@ -76,8 +105,8 @@ class LLMClient:
                             "gemini_keys": ["AIza-key1"],
                         }
 
-    storage_dir     Path to a folder where key state (quota, usage,
-                    status) is persisted across sessions.
+    storage_dir     Path to a folder where key state is persisted.
+                    Defaults to ``~/.infrakit/llm/`` if not given.
     mode            ``"async"`` — asyncio + semaphore concurrency.
                     ``"threaded"`` — ThreadPoolExecutor concurrency.
                     Default: ``"async"``.
@@ -97,7 +126,8 @@ class LLMClient:
     def __init__(
         self,
         keys: dict[str, list[str]],
-        storage_dir: str | Path,
+        storage_dir: Optional[str | Path] = None,
+        quota_file: Optional[str | Path] = None,
         mode: Literal["async", "threaded"] = "async",
         max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
         key_retries: int = _DEFAULT_KEY_RETRIES,
@@ -117,6 +147,7 @@ class LLMClient:
         self._km = KeyManager(
             keys=keys,
             storage_dir=storage_dir,
+            quota_file=quota_file,
             meta_window=meta_window,
         )
 
@@ -139,27 +170,23 @@ class LLMClient:
         **kwargs: Any,
     ) -> LLMResponse:
         """
-        Generate a response for a single prompt.
+        Generate a response for a single prompt (blocking).
+
+        Always uses the sync code path so it is safe to call from any context:
+        scripts, threads, Jupyter, FastAPI handlers, Windows, etc.
+
+        If you are inside an async function use ``await async_generate()``
+        instead; that path uses the async SDK clients end-to-end.
 
         Handles key rotation, RPM waiting, retries, and metadata recording.
         Always returns an LLMResponse — check ``.error`` for failures.
         """
-        if self._mode == "async":
-            return asyncio.run(
-                self._async_single_generate(
-                    prompt=prompt,
-                    response_model=response_model,
-                    provider=provider,
-                    **kwargs,
-                )
-            )
-        else:
-            return self._sync_single_generate(
-                prompt=prompt,
-                response_model=response_model,
-                provider=provider,
-                **kwargs,
-            )
+        return self._sync_single_generate(
+            prompt=prompt,
+            response_model=response_model,
+            provider=provider,
+            **kwargs,
+        )
 
     async def async_generate(
         self,
@@ -205,7 +232,7 @@ class LLMClient:
         progress = show_progress if show_progress is not None else self._show_progress
 
         if self._mode == "async":
-            return asyncio.run(
+            return _run_async(
                 async_batch(
                     generate_fn=self._async_single_generate,
                     prompts=prompts,
@@ -259,17 +286,25 @@ class LLMClient:
         """
         Set or update quota limits for a specific key.
 
-        Example::
+        ``quota.model`` controls scope:
+          - ``None``  (default) — applies to all models on this key that
+            don't have their own explicit entry.
+          - A model string — applies only to that model.
 
+        Examples::
+
+            # key-level RPM + default daily limit for all models
             client.set_quota(
-                provider="openai",
-                key_id="sk-abc123",          # first 8 chars
-                quota=QuotaConfig(
-                    rpm_limit=60,
-                    tpm_limit=90_000,
-                    daily_token_limit=1_000_000,
-                    reset_hour_utc=0,
-                ),
+                provider="gemini",
+                key_id="AIza-abc1",
+                quota=QuotaConfig(rpm_limit=15, daily_token_limit=1_500_000),
+            )
+
+            # tighter limit for one expensive model only
+            client.set_quota(
+                provider="gemini",
+                key_id="AIza-abc1",
+                quota=QuotaConfig(model="gemini-2.5-pro", daily_token_limit=250_000),
             )
         """
         self._km.set_quota(provider, key_id, quota)
@@ -296,7 +331,8 @@ class LLMClient:
         provider: Optional[str] = None,
         key_id: Optional[str] = None,
     ) -> None:
-        """Pretty-print key status to stdout."""
+        """Pretty-print key status to stdout (model-aware)."""
+        import datetime
         rows = self._km.status_report(provider=provider, key_id=key_id)
         if not rows:
             print("No keys found.")
@@ -308,40 +344,40 @@ class LLMClient:
             print(f"  Provider : {r['provider']}")
             print(f"  Key ID   : {r['key_id']}...")
             print(f"  Status   : {r['status']}")
-            if r["deactivated_at"]:
-                import datetime
-                dt = datetime.datetime.utcfromtimestamp(r["deactivated_at"])
-                print(f"  Deactivated at : {dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            print(f"  RPM limit: {r['rpm_limit'] or 'not set'}  |  "
+                  f"Current RPM: {r['current_rpm']}")
             print()
-            print(f"  Quota config")
-            print(f"    RPM limit        : {r['rpm_limit'] or 'not set'}")
-            print(f"    TPM limit        : {r['tpm_limit'] or 'not set'}")
-            print(f"    Daily token limit: {r['daily_token_limit'] or 'not set'}")
-            print(f"    Reset hour (UTC) : {r['reset_hour_utc']:02d}:00")
-            print()
-            print(f"  Current window (last 60 s)")
-            print(f"    RPM used : {r['current_rpm']}")
-            print(f"    TPM used : {r['current_tpm']}")
-            print()
-            print(f"  Daily")
-            print(f"    Tokens used    : {r['day_token_total']}")
-            daily_rem = r["daily_remaining"]
-            print(f"    Tokens remaining: {daily_rem if daily_rem is not None else 'unlimited'}")
-            print()
-            print(f"  Lifetime totals")
-            print(f"    Requests : {r['total_requests']}")
-            print(f"    Tokens   : {r['total_tokens']}")
-            print(f"    Errors   : {r['total_errors']}")
+
+            models = r.get("models", [])
+            if models:
+                print(f"  Models ({len(models)} tracked)")
+                for mr in models:
+                    status_flag = "\u2713" if mr["status"] == "active" else "\u2717"
+                    print(f"    [{status_flag}] {mr['model']}")
+                    if mr["deactivated_at"]:
+                        dt = datetime.datetime.utcfromtimestamp(mr["deactivated_at"])
+                        print(f"        Deactivated : {dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                    print(f"        TPM limit   : {mr['tpm_limit'] or 'not set'}  "
+                          f"Current TPM: {mr['current_tpm']}")
+                    daily_rem = mr["daily_remaining"]
+                    print(f"        Daily limit : {mr['daily_token_limit'] or 'not set'}  "
+                          f"Used: {mr['day_token_total']}  "
+                          f"Remaining: {daily_rem if daily_rem is not None else 'unlimited'}")
+                    print(f"        Reset hour  : {mr['reset_hour_utc']:02d}:00 UTC")
+                    print(f"        Totals      : {mr['total_requests']} req  "
+                          f"{mr['total_tokens']} tok  {mr['total_errors']} err")
+            else:
+                print("  No model usage recorded yet.")
+
             if r["recent_meta"]:
                 print()
                 print(f"  Last {len(r['recent_meta'])} requests")
                 for m in r["recent_meta"]:
-                    import datetime
                     ts = datetime.datetime.utcfromtimestamp(m["timestamp"])
-                    status_str = "ok" if m["success"] else f"ERR: {m.get('error', '')}"
+                    status_str = "ok" if m["success"] else f"ERR: {m.get('error', '')[:60]}"
                     print(
                         f"    {ts.strftime('%H:%M:%S')} UTC | "
-                        f"{m['model']:<20} | "
+                        f"{m['model']:<28} | "
                         f"in={m['input_tokens']} out={m['output_tokens']} "
                         f"total={m['total_tokens']} | "
                         f"{m['latency_ms']:.0f}ms | {status_str}"
@@ -362,21 +398,21 @@ class LLMClient:
         prov_impl = self._get_provider(provider)
 
         last_error: Optional[str] = None
-        keys_tried: set[str] = set()
+        keys_tried: set[tuple] = set()
 
         while True:
-            # acquire a key (raises if none left)
+            # acquire a key that has this model active
             try:
-                raw_key, ks = self._km.get_key(provider)
+                raw_key, ks = self._km.get_key(provider, model=prov_impl.model)
             except RuntimeError as exc:
                 return self._error_response(provider, str(exc))
 
-            # avoid re-trying same exhausted key in this loop
-            if ks.key_hash in keys_tried:
+            # avoid re-trying the same (key, model) combination
+            if (ks.key_hash, prov_impl.model) in keys_tried:
                 break
 
-            # wait for RPM slot
-            await self._rl.async_wait_for_slot(ks)
+            # wait for RPM slot (key-level) and TPM slot (model-level)
+            await self._rl.async_wait_for_slot(ks, prov_impl.model)
 
             # attempt with retries on same key
             for attempt in range(self._key_retries + 1):
@@ -420,14 +456,17 @@ class LLMClient:
                     self._km.record_request(ks, meta)
 
                     if is_quota:
-                        self._km.deactivate_key(ks, reason=last_error[:100])
-                        break  # rotate immediately
+                        # deactivate only this model on this key, not the whole key
+                        self._km.deactivate_model(
+                            ks, model=prov_impl.model, reason=last_error[:100]
+                        )
+                        break  # rotate to next key/model
                     if attempt < self._key_retries:
                         # small backoff before same-key retry
                         await asyncio.sleep(1.0 * (attempt + 1))
                     # else: fall through and rotate key
 
-            keys_tried.add(ks.key_hash)
+            keys_tried.add((ks.key_hash, prov_impl.model))
 
         return self._error_response(provider, last_error or "All keys exhausted.")
 
@@ -445,18 +484,18 @@ class LLMClient:
         prov_impl = self._get_provider(provider)
 
         last_error: Optional[str] = None
-        keys_tried: set[str] = set()
+        keys_tried: set[tuple] = set()
 
         while True:
             try:
-                raw_key, ks = self._km.get_key(provider)
+                raw_key, ks = self._km.get_key(provider, model=prov_impl.model)
             except RuntimeError as exc:
                 return self._error_response(provider, str(exc))
 
-            if ks.key_hash in keys_tried:
+            if (ks.key_hash, prov_impl.model) in keys_tried:
                 break
 
-            self._rl.sync_wait_for_slot(ks)
+            self._rl.sync_wait_for_slot(ks, prov_impl.model)
 
             for attempt in range(self._key_retries + 1):
                 t0 = time.perf_counter()
@@ -497,12 +536,14 @@ class LLMClient:
                     self._km.record_request(ks, meta)
 
                     if is_quota:
-                        self._km.deactivate_key(ks, reason=last_error[:100])
+                        self._km.deactivate_model(
+                            ks, model=prov_impl.model, reason=last_error[:100]
+                        )
                         break
                     if attempt < self._key_retries:
                         time.sleep(1.0 * (attempt + 1))
 
-            keys_tried.add(ks.key_hash)
+            keys_tried.add((ks.key_hash, prov_impl.model))
 
         return self._error_response(provider, last_error or "All keys exhausted.")
 

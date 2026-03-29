@@ -274,6 +274,7 @@ def scaffold_basic(
     author: str = "",
     config_fmt: str = "env",
     deps: str = "toml",
+    include_llm: bool = False,
 ) -> ScaffoldResult:
     """
     Scaffold a basic project layout under ``project_dir``.
@@ -309,7 +310,10 @@ def scaffold_basic(
     # ── utils ─────────────────────────────────────────────────────────────────
     _write(result, project_dir / "utils" / "__init__.py", '"""Shared utilities."""\n')
     _write(result, project_dir / "utils" / "logger.py", _logger_util())
-
+    if include_llm:
+        from infrakit.scaffolder.ai import _llm_util, _keys_json_template
+        _write(result, project_dir / "utils" / "llm.py", _llm_util(project_name))
+        _write(result, project_dir / "keys.json", _keys_json_template())
     # ── tests ─────────────────────────────────────────────────────────────────
     _write(result, project_dir / "tests" / "__init__.py", _tests_init())
 

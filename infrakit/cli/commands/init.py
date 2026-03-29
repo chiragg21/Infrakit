@@ -6,7 +6,6 @@ infrakit.cli.commands.init
 This is registered directly on the root app (not as a sub-Typer) so that
 ``ik init <project>`` works without an extra subcommand layer.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,7 +13,7 @@ from typing import Optional
 
 import typer
 
-from infrakit.scaffolder.generator import scaffold_basic, ScaffoldEntry
+from infrakit.scaffolder import *
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,8 +42,16 @@ def _render_entry(entry: ScaffoldEntry, project_dir: Path) -> None:
 
 # ── command function (registered on root app in main.py) ──────────────────────
 
+template_map = {"basic": scaffold_basic,
+                "ai": scaffold_ai,
+                "cli_tool": scaffold_cli_tool,
+                "pipeline": scaffold_pipeline,
+                "backend": scaffold_backend}
+
 def cmd_init(
     project: str = typer.Argument(..., help="Project folder name."),
+    template: str = typer.Option("basic", "--template", "-t", help="Template to use."),
+    include_llm: bool = typer.Option(False, "--include-llm", "-l", help="Include LLM client."),
     version: str = typer.Option("0.1.0", "--version", "-v", help="Starting version."),
     description: str = typer.Option("", "--description", "-d", help="Short project description."),
     author: str = typer.Option("", "--author", "-a", help='Author e.g. "Jane Doe <jane@example.com>".'),
@@ -78,13 +85,17 @@ def cmd_init(
     typer.echo()
 
     try:
-        result = scaffold_basic(
+        scaffolder = template_map.get(template)
+        if scaffolder is None:
+            _abort(f"Unknown template '{template}'. Choose from: {', '.join(sorted(template_map.keys()))}")
+        result = scaffolder(
             project_dir,
             version=version,
             description=description,
             author=author,
             config_fmt=config_fmt,
             deps=deps,
+            include_llm = include_llm,
         )
     except Exception as exc:  # noqa: BLE001
         _abort(f"Scaffolding failed: {exc}")

@@ -63,7 +63,7 @@ except ImportError:
 
 # python-dotenv is an optional dependency
 try:
-    from dotenv import dotenv_values
+    from dotenv import dotenv_values, find_dotenv
     _DOTENV_AVAILABLE = True
 except ImportError:
     _DOTENV_AVAILABLE = False
@@ -369,10 +369,10 @@ def load(
     path: str | Path,
     *,
     env_override: bool = False,
-    env_file: str | Path | None = None,
+    env_file: str | Path | None = ".env",
     inject_new: bool = False,
-    interpolate: bool = False,
-    cast_values: bool = False,
+    interpolate: bool = True,
+    cast_values: bool = True,
 ) -> ConfigDict:
     """Load a config file and return its contents as a dict.
 
@@ -467,9 +467,15 @@ def load(
     # When interpolate=True, skip overriding values that contain ${...}
     # templates — interpolation will expand them correctly instead.
     if env_file is not None:
-        env_file = Path(env_file)
-        if env_file.exists():
-            dotenv_vals = _load_dotenv(env_file)
+        env_file_path = Path(env_file)
+        # Auto-detect location if only a filename is provided
+        if _DOTENV_AVAILABLE and env_file_path.parent == Path():
+            found_env = find_dotenv(env_file_path.name, usecwd=True)
+            if found_env:
+                env_file_path = Path(found_env)
+        
+        if env_file_path.exists():
+            dotenv_vals = _load_dotenv(env_file_path)
             env_vars.update(dotenv_vals)
             config = _apply_flat_overrides(
                 config, dotenv_vals,
@@ -520,6 +526,12 @@ def load_env(path: str | Path = ".env", *, cast_values: bool = False) -> ConfigD
         types otherwise.
     """
     path = Path(path)
+    # Auto-detect location if only a filename is provided
+    if _DOTENV_AVAILABLE and path.parent == Path():
+        found_env = find_dotenv(path.name, usecwd=True)
+        if found_env:
+            path = Path(found_env)
+
     if not path.exists():
         raise FileNotFoundError(f".env file not found: '{path}'")
     data = _load_dotenv(path)

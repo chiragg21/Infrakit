@@ -1,5 +1,5 @@
 [project]
-name = "infrakit"
+name = "python-infrakit-dev"
 version = "0.1.0"
 description = "A comprehensive Python developer infrastructure toolkit"
 readme = "README.md"

@@ -106,7 +106,7 @@ infrakit
 def _env_config() -> str:
     return """\
 # Application configuration
-# Copy this file to .env.local and fill in the values.
+# Copy this file to .env and fill in the values.
 APP_ENV=development
 APP_DEBUG=false
 APP_SECRET=YOUR_VALUE_HERE
@@ -238,7 +238,7 @@ logs/
 *.log
 
 # Env files
-.env.local
+.env
 .env.*.local
 
 # IDE

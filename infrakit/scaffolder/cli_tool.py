@@ -290,7 +290,7 @@ pytest
 def _cli_gitignore() -> str:
     return _gitignore() + """\
 # Keys
-.env.local
+.env
 keys.json
 """
 

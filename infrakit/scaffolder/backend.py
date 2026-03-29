@@ -393,7 +393,7 @@ def _backend_readme(project_name: str, description: str) -> str:
 
 ```bash
 pip install -e .
-cp .env .env.local   # fill in secrets
+cp .env .env   # fill in secrets
 ```
 
 ## Run
@@ -446,7 +446,7 @@ def _backend_gitignore() -> str:
 *.sqlite3
 
 # Keys
-.env.local
+.env
 keys.json
 """
 

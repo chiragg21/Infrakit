@@ -464,7 +464,7 @@ data/staging/
 data/output/
 
 # Keys
-.env.local
+.env
 keys.json
 """
 

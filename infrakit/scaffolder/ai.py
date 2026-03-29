@@ -96,7 +96,7 @@ from infrakit.llm import LLMClient, Prompt  # re-export Prompt for convenience
 
 # ── key loading ───────────────────────────────────────────────────────────────
 # Keys are read from the environment or from a local keys.json file.
-# Never commit real API keys — use .env.local or your secret manager.
+# Never commit real API keys — use .env or your secret manager.
 
 def _load_keys() -> dict:
     keys_file = Path(os.getenv("LLM_KEYS_FILE", "keys.json"))

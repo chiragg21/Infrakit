@@ -16,6 +16,6 @@ test_deps.py
 uv.lock
 new_requirements.txt
 .env
-config.*
+config.ini
 testing.ipynb
 api_key_dir

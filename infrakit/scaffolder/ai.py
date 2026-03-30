@@ -58,9 +58,12 @@ utils.llm
 ~~~~~~~~~
 Thin wrapper that boots the infrakit LLM client once and exports it.
 
+Reads all configuration from the project config file (.env / config.yaml /
+config.json) via infrakit.config — no raw os.getenv calls.
+
 The client reads key state from ``~/.infrakit/llm/`` by default, and
 loads quota limits from ``~/.infrakit/llm/quotas.json`` if that file
-exists.  Both paths can be overridden with environment variables.
+exists.  Both paths can be overridden via LLM_STATE_DIR / LLM_QUOTA_FILE.
 
 Usage
 -----
@@ -89,24 +92,38 @@ Usage
 """
 
 import json
-import os
 from pathlib import Path
 
+from infrakit.core.config.loader import load, load_env
 from infrakit.llm import LLMClient, Prompt  # re-export Prompt for convenience
 
+# ── config loading ────────────────────────────────────────────────────────────
+
+def _load_cfg() -> dict:
+    if Path(".env").exists():
+        return load_env(".env", cast_values=True)
+    if Path("config.yaml").exists():
+        return load("config.yaml")
+    if Path("config.json").exists():
+        return load("config.json")
+    return {{}}
+
+
+_cfg = _load_cfg()
+
 # ── key loading ───────────────────────────────────────────────────────────────
-# Keys are read from the environment or from a local keys.json file.
+# Keys are read from the project config or from a local keys.json file.
 # Never commit real API keys — use .env or your secret manager.
 
 def _load_keys() -> dict:
-    keys_file = Path(os.getenv("LLM_KEYS_FILE", "keys.json"))
+    keys_file = Path(_cfg.get("LLM_KEYS_FILE", "keys.json"))
     if keys_file.exists():
         with open(keys_file) as f:
             return json.load(f)
 
-    # fall back to individual env vars
-    openai_key  = os.getenv("OPENAI_API_KEY", "")
-    gemini_key  = os.getenv("GEMINI_API_KEY", "")
+    # fall back to keys declared in the config file
+    openai_key  = _cfg.get("OPENAI_API_KEY", "")
+    gemini_key  = _cfg.get("GEMINI_API_KEY", "")
     return {{
         "openai_keys": [openai_key] if openai_key else [],
         "gemini_keys": [gemini_key] if gemini_key else [],
@@ -118,13 +135,13 @@ def _load_keys() -> dict:
 llm: LLMClient = LLMClient(
     keys=_load_keys(),
     # storage_dir and quota_file default to ~/.infrakit/llm/
-    # override with env vars if needed:
-    storage_dir=os.getenv("LLM_STATE_DIR") or None,
-    quota_file=os.getenv("LLM_QUOTA_FILE") or None,
-    mode=os.getenv("LLM_MODE", "async"),           # "async" | "threaded"
-    max_concurrent=int(os.getenv("LLM_CONCURRENCY", "3")),
-    openai_model=os.getenv("OPENAI_MODEL") or None,
-    gemini_model=os.getenv("GEMINI_MODEL") or None,
+    # override via LLM_STATE_DIR / LLM_QUOTA_FILE in your config file:
+    storage_dir=_cfg.get("LLM_STATE_DIR") or None,
+    quota_file=_cfg.get("LLM_QUOTA_FILE") or None,
+    mode=_cfg.get("LLM_MODE", "async"),            # "async" | "threaded"
+    max_concurrent=int(_cfg.get("LLM_CONCURRENCY", 3)),
+    openai_model=_cfg.get("OPENAI_MODEL") or None,
+    gemini_model=_cfg.get("GEMINI_MODEL") or None,
 )
 
 __all__ = ["llm", "Prompt"]
@@ -425,6 +442,7 @@ def scaffold_ai(
     config_fmt: str = "env",
     deps: str = "toml",
     include_notebooks: bool = True,
+    include_llm: bool = True,
 ) -> ScaffoldResult:
     """
     Scaffold an AI / ML project layout under ``project_dir``.
@@ -473,10 +491,14 @@ def scaffold_ai(
     _write(result, project_dir / "pipelines" / "preprocess.py", _pipeline_preprocess())
     _write(result, project_dir / "pipelines" / "predict.py",   _pipeline_predict())
 
+    # ── prompts ───────────────────────────────────────────────────────────────
+    _write(result, project_dir / "prompts" / "default.txt", _default_prompt())
+
     # ── utils ─────────────────────────────────────────────────────────────────
     _write(result, project_dir / "utils" / "__init__.py", '"""Shared utilities."""\n')
     _write(result, project_dir / "utils" / "logger.py",   _logger_util())
-    _write(result, project_dir / "utils" / "llm.py",      _llm_util(project_name))
+    if include_llm:
+        _write(result, project_dir / "utils" / "llm.py",  _llm_util(project_name))
 
     # ── notebooks ─────────────────────────────────────────────────────────────
     if include_notebooks:
@@ -487,7 +509,7 @@ def scaffold_ai(
     _write(result, project_dir / "tests" / "__init__.py", _tests_init())
 
     # ── config ────────────────────────────────────────────────────────────────
-    cfg_name, cfg_content = _config_content(config_fmt)
+    cfg_name, cfg_content = _config_content(config_fmt, include_llm=include_llm)
     _write(result, project_dir / cfg_name, cfg_content)
 
     # ── keys template (safe placeholder — never contains real keys) ───────────

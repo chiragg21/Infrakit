@@ -1,107 +1,301 @@
 # Infrakit
 
-Infrakit is a comprehensive, modular developer infrastructure toolkit for Python projects. It provides CLI utilities, rich project scaffolding, a robust multi-provider LLM client, dependency management, profiling, and core utilities for logging and configuration.
-
-## Installation
-
-Install via pip:
+A modular developer toolkit for Python — project scaffolding, logging, config loading, a multi-provider LLM client, and dependency utilities.
 
 ```bash
 pip install infrakit
-# or if using uv
-uv pip install infrakit
 ```
 
-The CLI is exposed as `infrakit` and conveniently aliased as `ik`.
+The CLI is available as `ik`.
 
-## Key Features
+---
 
-### 1. Project Scaffolding (`ik init`)
+## Scaffolding
 
-Quickly bootstrap new Python projects with standardized layouts, ready-to-use boilerplate, and optional LLM integration. Existing files are safely skipped if you re-run over a directory.
+Bootstrap a new project in one command:
 
 ```bash
-ik init my-project -t basic
-ik init my-fastapi-app -t backend -v 0.1.0
-ik init my-ai-tool -t ai --include-llm
+ik init my-project              # basic layout
+ik init my-api -t backend       # FastAPI service
+ik init my-model -t ai          # AI/ML project with pipelines and notebooks
+ik init my-etl -t pipeline      # ETL/data pipeline
+ik init my-cli -t cli_tool      # distributable CLI app
 ```
 
-**Available Templates**:
-- **`basic`**: Minimal template (src, utils, tests).
-- **`backend`**: FastAPI service (app, routes, middleware, Dockerfile, docker-compose).
-- **`cli_tool`**: Distributable CLI application using Typer.
-- **`pipeline`**: Data pipeline / ETL template (extract, transform, load, enrich).
-- **`ai`**: AI/ML project optimized for notebooks and pipelines.
+**All flags:**
 
-### 2. Multi-provider LLM Client (`infrakit.llm`)
+| Flag | Values | Default | Description |
+|---|---|---|---|
+| `-t` / `--template` | `basic`, `backend`, `ai`, `pipeline`, `cli_tool` | `basic` | Project template |
+| `-v` / `--version` | e.g. `0.1.0` | `0.1.0` | Starting version string |
+| `--description` | string | `""` | Short description added to pyproject.toml and README |
+| `--author` | string | `""` | Author line in pyproject.toml |
+| `--config` | `env`, `yaml`, `json` | `env` | Config file format to generate |
+| `--deps` | `toml`, `requirements` | `toml` | Dependency file style |
+| `--include-llm` | flag | off | Add `utils/llm.py` wired to `infrakit.llm` |
 
-A unified LLM client interface supporting **OpenAI** and **Gemini**. Built natively for robust production use cases, particularly when navigating free-tier API quotas.
+Every template generates a config file pre-populated with the variables its utilities need (logger settings, LLM keys, app settings). Re-running over an existing directory skips files already present.
 
-**Features:**
-- Seamless key rotation and persistent storage tracking.
-- Local rate limiting (RPM/TPM gates).
-- Async and multi-threaded batch generation.
-- Structured output parsing and schema validation using `pydantic.BaseModel`.
+---
 
-**Quick Start:**
+## Core — Config & Logger
+
+### Config loader
+
 ```python
-from infrakit.llm import LLMClient, Prompt
+from infrakit.core.config.loader import load, load_env
 
-client = LLMClient(keys={"openai_keys": ["sk-..."], "gemini_keys": ["AIza..."]}, storage_dir="./logs")
-response = client.generate(Prompt(user="What is the capital of France?"), provider="openai")
-print(response.content)
+cfg = load_env(".env", cast_values=True)   # "true" → bool, "42" → int
+cfg = load("config.yaml")
+cfg = load("config.json")
+
+port = cfg.get("APP_PORT", 8000)
 ```
 
-**LLM CLI tools:**
-Monitor and control limits right from the CLI.
-- `ik llm status --storage-dir ./logs`
-- `ik llm quota set --provider openai --key sk-abc --rpm 60 --storage-dir ./logs`
+**`load(path, *, ...)`** — load a config file (JSON, YAML, INI, or `.env`), format inferred from extension.
 
-### 3. Dependency Management (`infrakit.deps`)
+| Parameter | Default | Description |
+|---|---|---|
+| `path` | — | Path to the config file |
+| `env_override` | `False` | Let existing environment variables override file values |
+| `env_file` | `".env"` | `.env` file to merge in alongside the config |
+| `inject_new` | `False` | Add any new keys from the env file into the result |
+| `interpolate` | `True` | Expand `${VAR}` references within values |
+| `cast_values` | `True` | Convert strings to int, float, bool where possible |
 
-In-depth Python dependency tools available under `ik deps` (or programmatically via `infrakit.deps`) to clean, health-check, scan, and optimize dependencies.
+**`load_env(path, *, cast_values)`** — convenience wrapper to load a `.env` file directly. `cast_values` defaults to `False`.
 
-**Features:**
-- `scan(root)`: Scan your project for actual Python dependencies used in code.
-- `export()`: Export used dependencies to update `requirements.txt` or `pyproject.toml` automatically.
-- `check(packages)`: Run health, security, and outdated checks on packages.
-- `clean()`: Find and remove unused packages from the virtual environment.
-- `optimise()`: Optimize and format imports across the project (integrates with `isort`).
+---
 
-### 4. Code Profiling (`infrakit.time`)
+### Logger
 
-Lightweight timing and execution profiling for your Python projects.
-
-**CLI Usage:**
-Profile any script instantly to detect performance bottlenecks.
-```bash
-ik time run script.py --max-functions 30 --min-time 1.0
-```
-
-**Decorator Usage:**
-Track specific pipeline steps inside your code:
-```python
-from infrakit.time import pipeline_profiler, track
-
-@pipeline_profiler("Data Processing Pipeline")
-def main():
-    load_data()
-    transform_data()
-
-@track(name="Load Step")
-def load_data(): pass
-```
-
-### 5. Core Utilities (`infrakit.core`)
-
-Convenient implementations for common application needs.
-
-- **Config Loader** (`infrakit.core.config.loader`): Multi-format configuration loader supporting JSON, YAML, INI, and `.env`. Automatically resolves variables using `python-dotenv` and converts types properly natively.
-- **Logger** (`infrakit.core.logger`): Unified logging setups for consistent output across applications.
 ```python
 from infrakit.core.logger import setup, get_logger
 
-setup(level="INFO", strategy="date_level", stream="stdout")
+setup(log_dir="logs", strategy="date", stream="stdout", fmt="human", level="INFO")
+
 log = get_logger(__name__)
-log.info("Ready")
+log.info("started on port %d", 8080)
+```
+
+**`setup(*, ...)`** — configure logging once at startup. All parameters are keyword-only.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `level` | `"DEBUG"` | Minimum log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `fmt` | `"human"` | Console format — `"human"` for readable text, `"json"` for structured |
+| `file_fmt` | `"human"` | Format used in log files (same options as `fmt`) |
+| `strategy` | `"date"` | File rotation strategy — `"date"`, `"date_level"`, or `"single"` |
+| `stream` | `"stdout"` | Where to echo logs — `"stdout"`, `"stderr"`, or `None` to disable |
+| `log_dir` | `"logs"` | Directory where log files are written |
+| `session` | `None` | Label this run — adds a session prefix to log filenames |
+| `retention` | `30` | Days to keep old log files before deletion |
+| `max_bytes` | `10MB` | Max size of a single log file before rotation |
+| `force` | `False` | Re-apply setup even if already configured |
+
+**`get_logger(name)`** — returns a stdlib `Logger`. Always call as `get_logger(__name__)`. Safe to call before `setup()`.
+
+---
+
+## LLM Client
+
+A unified client for **OpenAI** and **Gemini** with key rotation, rate limiting, quota tracking, and async/batch generation.
+
+```python
+from infrakit.llm import LLMClient, Prompt
+
+client = LLMClient(
+    keys={"openai_keys": ["sk-..."], "gemini_keys": ["AIza..."]},
+    storage_dir="./llm_state",  # persists key usage across restarts
+)
+
+response = client.generate(Prompt(user="What is 2+2?"), provider="openai")
+print(response.content)
+```
+
+**`LLMClient(keys, ...)`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `keys` | — | Dict with `openai_keys` and/or `gemini_keys` lists of API key strings |
+| `storage_dir` | `~/.infrakit/llm` | Directory where key state is persisted across restarts |
+| `quota_file` | `None` | Path to a `quotas.json` file with per-provider/model limits |
+| `mode` | `"async"` | Batch execution mode — `"async"` or `"threaded"` |
+| `max_concurrent` | `3` | Max parallel requests in batch calls |
+| `key_retries` | `3` | How many keys to try before giving up on a request |
+| `schema_retries` | `2` | How many times to retry structured output parsing on schema mismatch |
+| `meta_window` | `200` | Number of recent requests to keep in memory per key |
+| `openai_model` | `"gpt-4o-mini"` | Default OpenAI model |
+| `gemini_model` | `"gemini-2.0-flash"` | Default Gemini model |
+| `show_progress` | `True` | Show a progress bar during batch generation |
+
+---
+
+**`generate(prompt, provider, response_model, **kwargs)`** — blocking single call, safe in any context.
+
+**`async_generate(prompt, provider, response_model, **kwargs)`** — async version, use inside `async` functions.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `prompt` | — | `Prompt(system=..., user=...)` — `system` is optional |
+| `provider` | — | `"openai"` or `"gemini"` |
+| `response_model` | `None` | Pydantic `BaseModel` subclass for structured output parsing |
+
+---
+
+**`batch_generate(prompts, provider, ...)`** — run many prompts; results match input order.
+
+**`async_batch_generate(prompts, provider, ...)`** — async version for use inside `async` functions.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `prompts` | — | List of `Prompt` objects |
+| `provider` | — | `"openai"` or `"gemini"` |
+| `response_model` | `None` | Pydantic model for structured output on every item |
+| `max_concurrent` | client default | Override the client-level concurrency limit for this batch |
+| `show_progress` | client default | Override the client-level progress bar setting |
+
+```python
+batch = client.batch_generate(prompts, provider="openai")
+print(batch.success_count, batch.failure_count, batch.total_tokens)
+for r in batch.results:
+    print(r.content if not r.error else r.error)
+```
+
+---
+
+**Structured output:**
+
+```python
+from pydantic import BaseModel
+
+class Summary(BaseModel):
+    title: str
+    bullets: list[str]
+
+response = client.generate(Prompt(user="Summarise: ..."), provider="openai", response_model=Summary)
+if response.schema_matched:
+    print(response.parsed.bullets)   # typed Summary instance
+```
+
+---
+
+**`set_quota(provider, key_id, quota)`** — set limits for a specific key.
+
+```python
+from infrakit.llm import QuotaConfig
+
+# key-level RPM (applies to all models on this key)
+client.set_quota(provider="openai", key_id="sk-key1", quota=QuotaConfig(rpm_limit=60))
+
+# per-model daily token limit
+client.set_quota(provider="gemini", key_id="AIza-key1", quota=QuotaConfig(model="gemini-2.5-pro", daily_token_limit=250_000))
+```
+
+`QuotaConfig` fields: `model` (None = all models on the key), `rpm_limit`, `daily_token_limit`, `tpm_limit`.
+
+Quota defaults can also be set in a `quotas.json` file — pass the path via `quota_file=` in the constructor.
+
+---
+
+**`status(provider, key_id)`** — return key status as a list of dicts. **`print_status(provider, key_id)`** — same but pretty-printed to stdout.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `provider` | `None` | Filter to `"openai"` or `"gemini"`; `None` returns all |
+| `key_id` | `None` | Filter to a specific key (first 8 chars); `None` returns all |
+
+```python
+rows = client.status(provider="openai")
+# each row: provider, key_id, status, rpm_limit, current_rpm, models
+```
+
+**CLI:**
+
+```bash
+ik llm status --storage-dir ./llm_state
+ik llm quota set --provider openai --key sk-abc --rpm 60 --storage-dir ./llm_state
+```
+
+---
+
+## Other Features
+
+### Dependency management (`infrakit.deps`)
+
+```bash
+ik deps scan .                   # list packages your code actually imports
+ik deps export . --format toml   # sync pyproject.toml / requirements.txt
+ik deps check --packages numpy   # outdated, security, and license checks
+ik deps clean . --dry-run        # find unused installed packages
+ik deps optimise .               # sort and clean imports (isort)
+```
+
+**`scan(root, include_notebooks, use_gitignore)`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `root` | — | Project root to scan |
+| `include_notebooks` | `False` | Also scan `.ipynb` notebook files |
+| `use_gitignore` | `True` | Skip paths matched by `.gitignore` |
+
+**`export(root, output, inplace, keep_versions, include_notebooks, use_gitignore)`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `root` | — | Project root to scan |
+| `output` | `None` | Write to this path instead of the detected dependency file |
+| `inplace` | `False` | Update the existing file in place |
+| `keep_versions` | `True` | Preserve pinned version specifiers already in the file |
+| `include_notebooks` | `False` | Also scan `.ipynb` files |
+| `use_gitignore` | `True` | Skip gitignored paths |
+
+**`check(root, packages, outdated, security, licenses)`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `root` | `None` | Auto-scan this root for packages (used if `packages` is `None`) |
+| `packages` | `None` | Explicit list of package names to check |
+| `outdated` | `True` | Check for newer versions on PyPI |
+| `security` | `True` | Run vulnerability checks |
+| `licenses` | `True` | Check license compatibility |
+
+Returns a `HealthReport` with `.outdated`, `.vulnerable`, `.licenses`, and `.errors` lists.
+
+**`clean(root, protected, dry_run)`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `root` | — | Project root (used to determine what is actually imported) |
+| `protected` | `None` | Set of package names to never remove |
+| `dry_run` | `True` | Preview only — pass `False` to actually uninstall |
+
+Returns a `CleanResult` with `.to_remove`, `.removed`, `.skipped`, and `.errors` lists.
+
+**`optimise(root, files, convert_to, use_isort, dry_run)`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `root` | — | Project root |
+| `files` | `None` | Specific files to process; `None` processes all `.py` files |
+| `convert_to` | `None` | Rewrite import style (e.g. `"absolute"`) |
+| `use_isort` | `True` | Run `isort` on each file |
+| `dry_run` | `False` | Preview changes without writing files |
+
+---
+
+### Profiling (`infrakit.time`)
+
+```bash
+ik time run script.py
+```
+
+```python
+from infrakit.time import pipeline_profiler, track
+
+@pipeline_profiler("My Pipeline")
+def main(): ...
+
+@track(name="Load Step")
+def load_data(): ...
 ```

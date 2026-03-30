@@ -543,7 +543,7 @@ def scaffold_pipeline(
     _write(result, project_dir / "tests" / "test_pipeline.py", _test_pipeline())
 
     # ── config ────────────────────────────────────────────────────────────────
-    cfg_name, cfg_content = _config_content(config_fmt)
+    cfg_name, cfg_content = _config_content(config_fmt, include_llm=include_llm)
     _write(result, project_dir / cfg_name, cfg_content)
 
     # ── dependency file ───────────────────────────────────────────────────────

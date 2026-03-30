@@ -653,3 +653,151 @@ class TestIntegration:
         content = out.read_text()
         assert "click" in content and "rich" in content
         assert "flask" not in content and "numpy" not in content
+
+
+# ===========================================================================
+# Additional high-level API coverage
+# ===========================================================================
+
+class TestHighLevelCheck:
+    """infrakit.deps.check() high-level API and HealthReport structure."""
+
+    @patch("infrakit.deps.health._fetch_pypi_latest")
+    @patch("infrakit.deps.health.get_all_installed")
+    def test_check_returns_health_report(self, mock_installed, mock_fetch):
+        mock_installed.return_value = {"requests": "2.31.0"}
+        mock_fetch.return_value = "2.31.0"
+        from infrakit.deps import check
+        report = check(packages=["requests"], security=False, licenses=False)
+        from infrakit.deps.health import HealthReport
+        assert isinstance(report, HealthReport)
+        assert len(report.outdated) == 1
+
+    @patch("infrakit.deps.health._fetch_pypi_latest")
+    @patch("infrakit.deps.health.get_all_installed")
+    def test_check_from_root_scans_automatically(
+        self, mock_installed, mock_fetch, tmp_project
+    ):
+        mock_installed.return_value = {"numpy": "1.24.0"}
+        mock_fetch.return_value = "1.24.0"
+        from infrakit.deps import check
+        from infrakit.deps.health import HealthReport
+        report = check(root=tmp_project, security=False, licenses=False)
+        assert isinstance(report, HealthReport)
+        assert isinstance(report.outdated, list)
+
+    def test_check_requires_root_or_packages(self):
+        from infrakit.deps import check
+        with pytest.raises(ValueError):
+            check()
+
+    def test_health_report_has_error_list(self):
+        from infrakit.deps.health import HealthReport
+        r = HealthReport()
+        assert isinstance(r.errors, list)
+
+    def test_license_info_structure(self):
+        pkg = _any_installed_package()
+        from infrakit.deps.health import check_licenses
+        results = check_licenses([pkg])
+        li = results[0]
+        assert hasattr(li, "package")
+        assert hasattr(li, "version")
+        assert hasattr(li, "license")
+        assert hasattr(li, "compatible")
+
+
+class TestHighLevelClean:
+    """infrakit.deps.clean() high-level API and CleanResult structure."""
+
+    def test_clean_dry_run_returns_result(self, tmp_project):
+        from infrakit.deps import clean
+        from infrakit.deps.clean import CleanResult
+        result = clean(tmp_project, dry_run=True)
+        assert isinstance(result, CleanResult)
+
+    def test_clean_result_has_expected_fields(self, tmp_project):
+        from infrakit.deps import clean
+        result = clean(tmp_project, dry_run=True)
+        assert hasattr(result, "to_remove")
+        assert hasattr(result, "removed")
+        assert hasattr(result, "dry_run")
+        assert result.dry_run is True
+
+    def test_clean_dry_run_does_not_uninstall(self, tmp_project):
+        from infrakit.deps import clean
+        with patch("subprocess.run") as mock_run:
+            clean(tmp_project, dry_run=True)
+        mock_run.assert_not_called()
+
+    def test_clean_protected_set(self, tmp_project):
+        from infrakit.deps import clean
+        result = clean(tmp_project, protected={"requests"}, dry_run=True)
+        assert "requests" not in result.to_remove
+
+
+class TestHighLevelOptimise:
+    """infrakit.deps.optimise() high-level API."""
+
+    def test_optimise_returns_list(self, tmp_project):
+        from infrakit.deps import optimise
+        results = optimise(tmp_project, use_isort=False, dry_run=True)
+        assert isinstance(results, list)
+
+    def test_optimise_dry_run_no_changes(self, tmp_project):
+        """Files must not be modified in dry-run mode."""
+        from infrakit.deps import optimise
+        before = {p: p.read_text() for p in tmp_project.rglob("*.py")}
+        optimise(tmp_project, use_isort=False, dry_run=True)
+        after = {p: p.read_text() for p in tmp_project.rglob("*.py")}
+        assert before == after
+
+    def test_optimise_specific_files(self, tmp_path):
+        f = tmp_path / "dup.py"
+        f.write_text("import os\nimport os\nx = os.getcwd()\n")
+        from infrakit.deps import optimise
+        results = optimise(tmp_path, files=[f], use_isort=False, dry_run=True)
+        assert any(r.duplicates_removed > 0 for r in results)
+
+
+class TestDepfileCoverage:
+    """update_pyproject_inplace and all_declared_packages."""
+
+    def test_update_pyproject_inplace(self, tmp_pyproject):
+        from infrakit.deps.depfile import _parse_pyproject, update_pyproject_inplace
+        df = _parse_pyproject(tmp_pyproject / "pyproject.toml")
+        # keep only click and rich; flask and numpy should be removed
+        update_pyproject_inplace(df, {"click", "rich"})
+        content = (tmp_pyproject / "pyproject.toml").read_text()
+        assert "click" in content and "rich" in content
+        assert "flask" not in content and "numpy" not in content
+
+    def test_all_declared_packages(self, tmp_project):
+        from infrakit.deps.depfile import find_dep_files, all_declared_packages
+        dep_files = find_dep_files(tmp_project)
+        declared = all_declared_packages(dep_files)
+        assert "numpy" in declared
+        assert "requests" in declared
+
+    def test_export_include_notebooks(self, tmp_path):
+        nb_code = (
+            '{"cells": [{"cell_type": "code", "source": '
+            '["import scipy\\n", "scipy.stats.norm()"]}]}'
+        )
+        (tmp_path / "nb.ipynb").write_text(nb_code)
+        (tmp_path / "requirements.txt").write_text("scipy>=1.10\n")
+        from infrakit.deps import export
+        out = tmp_path / "out.txt"
+        export(root=tmp_path, output=out, include_notebooks=True)
+        assert "scipy" in out.read_text()
+
+    def test_export_use_gitignore_false_sees_all(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("hidden/\n")
+        hidden = tmp_path / "hidden"
+        hidden.mkdir()
+        (hidden / "secret.py").write_text("import paramiko\nparamiko.SSHClient()\n")
+        (tmp_path / "requirements.txt").write_text("paramiko>=3.0\n")
+        from infrakit.deps import export
+        out = tmp_path / "out.txt"
+        export(root=tmp_path, output=out, use_gitignore=False)
+        assert "paramiko" in out.read_text()

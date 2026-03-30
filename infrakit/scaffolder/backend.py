@@ -47,7 +47,6 @@ from infrakit.scaffolder.generator import (
     ScaffoldResult,
     _mkdir,
     _write,
-    _config_content,
     _gitignore,
     _logger_util,
     _src_init,
@@ -56,6 +55,107 @@ from infrakit.scaffolder.generator import (
 
 
 # ── template content ──────────────────────────────────────────────────────────
+
+
+def _backend_env_config(project_name: str, include_llm: bool) -> str:
+    llm_block = """\
+
+# LLM
+LLM_KEYS_FILE=keys.json
+OPENAI_API_KEY=
+GEMINI_API_KEY=
+LLM_MODE=async
+LLM_CONCURRENCY=3
+# OPENAI_MODEL=gpt-4o
+# GEMINI_MODEL=gemini-2.0-flash
+""" if include_llm else ""
+    return f"""\
+# Application
+APP_NAME={project_name}
+APP_ENV=development
+APP_DEBUG=false
+APP_HOST=0.0.0.0
+APP_PORT=8000
+
+# Database
+DATABASE_URL=sqlite:///./app.db
+
+# Logger
+LOG_DIR=logs
+LOG_STRATEGY=date
+LOG_STREAM=stdout
+LOG_FORMAT=human
+LOG_LEVEL=DEBUG
+{llm_block}"""
+
+
+def _backend_yaml_config(project_name: str, include_llm: bool) -> str:
+    llm_block = """
+
+# LLM
+LLM_KEYS_FILE: keys.json
+OPENAI_API_KEY: ""
+GEMINI_API_KEY: ""
+LLM_MODE: async
+LLM_CONCURRENCY: 3
+# OPENAI_MODEL: gpt-4o
+# GEMINI_MODEL: gemini-2.0-flash
+""" if include_llm else ""
+    return f"""\
+# Application configuration
+app:
+  name: {project_name}
+  env: development
+  debug: false
+  host: 0.0.0.0
+  port: 8000
+
+# Database
+DATABASE_URL: sqlite:///./app.db
+
+# Logger (flat keys — read by utils/logger.py via infrakit.config)
+LOG_DIR: logs
+LOG_STRATEGY: date
+LOG_STREAM: stdout
+LOG_FORMAT: human
+LOG_LEVEL: DEBUG
+{llm_block}"""
+
+
+def _backend_json_config(project_name: str, include_llm: bool) -> str:
+    llm_keys = """,
+  "LLM_KEYS_FILE": "keys.json",
+  "OPENAI_API_KEY": "",
+  "GEMINI_API_KEY": "",
+  "LLM_MODE": "async",
+  "LLM_CONCURRENCY": 3""" if include_llm else ""
+    return f"""\
+{{
+  "app": {{
+    "name": "{project_name}",
+    "env": "development",
+    "debug": false,
+    "host": "0.0.0.0",
+    "port": 8000
+  }},
+  "DATABASE_URL": "sqlite:///./app.db",
+  "LOG_DIR": "logs",
+  "LOG_STRATEGY": "date",
+  "LOG_STREAM": "stdout",
+  "LOG_FORMAT": "human",
+  "LOG_LEVEL": "DEBUG"{llm_keys}
+}}
+"""
+
+
+def _backend_config_content(
+    fmt: str, project_name: str, include_llm: bool
+) -> tuple[str, str]:
+    if fmt == "yaml":
+        return "config.yaml", _backend_yaml_config(project_name, include_llm)
+    if fmt == "json":
+        return "config.json", _backend_json_config(project_name, include_llm)
+    return ".env", _backend_env_config(project_name, include_llm)
 
 
 def _app_init(version: str) -> str:
@@ -526,13 +626,17 @@ def scaffold_backend(
     # ── utils ─────────────────────────────────────────────────────────────────
     _write(result, project_dir / "utils" / "__init__.py", '"""Shared utilities."""\n')
     _write(result, project_dir / "utils" / "logger.py",   _logger_util())
+    if include_llm:
+        from infrakit.scaffolder.ai import _llm_util, _keys_json_template
+        _write(result, project_dir / "utils" / "llm.py",  _llm_util(project_name))
+        _write(result, project_dir / "keys.json",          _keys_json_template())
 
     # ── tests ─────────────────────────────────────────────────────────────────
     _write(result, project_dir / "tests" / "__init__.py", _tests_init())
     _write(result, project_dir / "tests" / "test_health.py", _test_health())
 
     # ── config ────────────────────────────────────────────────────────────────
-    cfg_name, cfg_content = _config_content(config_fmt)
+    cfg_name, cfg_content = _backend_config_content(config_fmt, project_name, include_llm)
     _write(result, project_dir / cfg_name, cfg_content)
 
     # ── docker ────────────────────────────────────────────────────────────────

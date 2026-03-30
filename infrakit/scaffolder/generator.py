@@ -103,45 +103,95 @@ infrakit
 """
 
 
-def _env_config() -> str:
-    return """\
-# Application configuration
-# Copy this file to .env and fill in the values.
+def _env_config(include_llm: bool = False) -> str:
+    llm_block = """\
+
+# LLM
+LLM_KEYS_FILE=keys.json
+OPENAI_API_KEY=
+GEMINI_API_KEY=
+LLM_MODE=async
+LLM_CONCURRENCY=3
+# OPENAI_MODEL=gpt-4o
+# GEMINI_MODEL=gemini-2.0-flash
+# LLM_STATE_DIR=
+# LLM_QUOTA_FILE=
+""" if include_llm else ""
+    return f"""\
+# Application
 APP_ENV=development
 APP_DEBUG=false
 APP_SECRET=YOUR_VALUE_HERE
-"""
+
+# Logger
+LOG_DIR=logs
+LOG_STRATEGY=date
+LOG_STREAM=stdout
+LOG_FORMAT=human
+LOG_LEVEL=DEBUG
+{llm_block}"""
 
 
-def _yaml_config() -> str:
-    return """\
+def _yaml_config(include_llm: bool = False) -> str:
+    llm_block = """
+
+# LLM
+LLM_KEYS_FILE: keys.json
+OPENAI_API_KEY: ""
+GEMINI_API_KEY: ""
+LLM_MODE: async
+LLM_CONCURRENCY: 3
+# OPENAI_MODEL: gpt-4o
+# GEMINI_MODEL: gemini-2.0-flash
+# LLM_STATE_DIR: ""
+# LLM_QUOTA_FILE: ""
+""" if include_llm else ""
+    return f"""\
 # Application configuration
 app:
   env: development
   debug: false
   secret: YOUR_VALUE_HERE
-"""
+
+# Logger (flat keys — read by utils/logger.py via infrakit.config)
+LOG_DIR: logs
+LOG_STRATEGY: date
+LOG_STREAM: stdout
+LOG_FORMAT: human
+LOG_LEVEL: DEBUG
+{llm_block}"""
 
 
-def _json_config() -> str:
-    return """\
-{
-  "app": {
+def _json_config(include_llm: bool = False) -> str:
+    llm_keys = """,
+  "LLM_KEYS_FILE": "keys.json",
+  "OPENAI_API_KEY": "",
+  "GEMINI_API_KEY": "",
+  "LLM_MODE": "async",
+  "LLM_CONCURRENCY": 3""" if include_llm else ""
+    return f"""\
+{{
+  "app": {{
     "env": "development",
     "debug": false,
     "secret": "YOUR_VALUE_HERE"
-  }
-}
+  }},
+  "LOG_DIR": "logs",
+  "LOG_STRATEGY": "date",
+  "LOG_STREAM": "stdout",
+  "LOG_FORMAT": "human",
+  "LOG_LEVEL": "DEBUG"{llm_keys}
+}}
 """
 
 
-def _config_content(fmt: str) -> tuple[str, str]:
+def _config_content(fmt: str, *, include_llm: bool = False) -> tuple[str, str]:
     """Return (filename, content) for the chosen config format."""
     if fmt == "yaml":
-        return "config.yaml", _yaml_config()
+        return "config.yaml", _yaml_config(include_llm)
     if fmt == "json":
-        return "config.json", _json_config()
-    return ".env", _env_config()  # default
+        return "config.json", _json_config(include_llm)
+    return ".env", _env_config(include_llm)  # default
 
 
 def _logger_util() -> str:
@@ -151,6 +201,9 @@ utils.logger
 ~~~~~~~~~~~~
 Thin wrapper that boots the infrakit logger once and exports ``get_logger``.
 
+Reads LOG_DIR, LOG_STRATEGY, LOG_STREAM, LOG_FORMAT, and LOG_LEVEL from the
+project config file (.env / config.yaml / config.json) via infrakit.config.
+
 Usage
 -----
     from utils.logger import get_logger
@@ -159,22 +212,34 @@ Usage
     log.info("hello")
 \"\"\"
 
-import os
+from pathlib import Path
+from infrakit.core.config.loader import load, load_env
 from infrakit.core.logger import setup, get_logger  # re-export get_logger
 
 _booted = False
+
+
+def _load_cfg() -> dict:
+    if Path(".env").exists():
+        return load_env(".env", cast_values=True)
+    if Path("config.yaml").exists():
+        return load("config.yaml")
+    if Path("config.json").exists():
+        return load("config.json")
+    return {}
 
 
 def _boot() -> None:
     global _booted
     if _booted:
         return
+    cfg = _load_cfg()
     setup(
-        log_dir=os.getenv("LOG_DIR", "logs"),
-        strategy=os.getenv("LOG_STRATEGY", "date"),
-        stream=os.getenv("LOG_STREAM", "stdout"),
-        fmt=os.getenv("LOG_FORMAT", "human"),
-        level=os.getenv("LOG_LEVEL", "DEBUG"),
+        log_dir=cfg.get("LOG_DIR", "logs"),
+        strategy=cfg.get("LOG_STRATEGY", "date"),
+        stream=cfg.get("LOG_STREAM", "stdout"),
+        fmt=cfg.get("LOG_FORMAT", "human"),
+        level=cfg.get("LOG_LEVEL", "DEBUG"),
     )
     _booted = True
 
@@ -318,7 +383,7 @@ def scaffold_basic(
     _write(result, project_dir / "tests" / "__init__.py", _tests_init())
 
     # ── config file ───────────────────────────────────────────────────────────
-    cfg_name, cfg_content = _config_content(config_fmt)
+    cfg_name, cfg_content = _config_content(config_fmt, include_llm=include_llm)
     _write(result, project_dir / cfg_name, cfg_content)
 
     # ── dependency file ───────────────────────────────────────────────────────

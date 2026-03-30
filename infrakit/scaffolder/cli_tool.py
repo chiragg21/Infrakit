@@ -366,7 +366,7 @@ def scaffold_cli_tool(
     _write(result, project_dir / "tests" / "test_cli.py",  _test_cli(project_name))
 
     # ── config ────────────────────────────────────────────────────────────────
-    cfg_name, cfg_content = _config_content(config_fmt)
+    cfg_name, cfg_content = _config_content(config_fmt, include_llm=include_llm)
     _write(result, project_dir / cfg_name, cfg_content)
 
     # ── dependency file ───────────────────────────────────────────────────────

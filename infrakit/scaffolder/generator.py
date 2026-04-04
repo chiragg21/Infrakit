@@ -78,7 +78,7 @@ name        = "{project_name}"
 version     = "{version}"
 description = "{description}"
 readme      = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 authors = [
 {author_line}
 ]

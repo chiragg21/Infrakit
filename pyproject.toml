@@ -1,18 +1,25 @@
 [project]
 name = "python-infrakit-dev"
-version = "0.1.4"
+version = "0.1.5"
 description = "A comprehensive Python developer infrastructure toolkit"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
-    "google-genai>=1.69.0",
     "isort>=8.0.1",
-    "openai>=2.30.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
-    "tqdm>=4.67.3",
     "typer>=0.24.1",
+]
+
+[project.optional-dependencies]
+llm = [
+    "google-genai>=1.69.0",
+    "openai>=2.30.0",
+    "tqdm>=4.67.3",
+]
+all = [
+    "python-infrakit-dev[llm]",
 ]
 
 [dependency-groups]

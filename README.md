@@ -2,11 +2,65 @@
 
 A modular developer toolkit for Python — project scaffolding, logging, config loading, a multi-provider LLM client, and dependency utilities.
 
+**Requires Python 3.10+**
+
+---
+
+## Installation
+
+**Core** — scaffolding, config, logging, deps, profiling, and CLI:
+
 ```bash
-pip install infrakit
+pip install python-infrakit-dev
 ```
 
-The CLI is available as `ik`.
+**With LLM support** — adds OpenAI and Gemini providers:
+
+```bash
+pip install python-infrakit-dev[llm]
+```
+
+**Everything:**
+
+```bash
+pip install python-infrakit-dev[all]
+```
+
+The CLI is available as both `infrakit` and `ik`.
+
+---
+
+## Quick Imports
+
+Most public symbols are available directly from the top-level package:
+
+```python
+# Logging
+from infrakit import setup, get_logger
+
+# Config
+from infrakit import load, load_env, validate, Schema, field
+
+# Config conversion / export
+from infrakit import convert_file, convert_dict, export_file, export_dict
+
+# LLM (requires infrakit[llm])
+from infrakit import LLMClient, Prompt, QuotaConfig
+
+# Subpackages
+from infrakit import deps, scaffolder, time
+```
+
+Or import from the specific subpackages:
+
+```python
+from infrakit.core.config import load, validate, convert_dict, export_file
+from infrakit.core.logger import setup, get_logger
+from infrakit.llm import LLMClient, Prompt
+from infrakit.deps import scan, export, check, clean, optimise
+from infrakit.scaffolder import scaffold_basic, scaffold_ai, scaffold_backend
+from infrakit.time import pipeline_profiler, track
+```
 
 ---
 
@@ -43,7 +97,7 @@ Every template generates a config file pre-populated with the variables its util
 ### Config loader
 
 ```python
-from infrakit.core.config.loader import load, load_env
+from infrakit.core.config import load, load_env
 
 cfg = load_env(".env", cast_values=True)   # "true" → bool, "42" → int
 cfg = load("config.yaml")
@@ -64,6 +118,49 @@ port = cfg.get("APP_PORT", 8000)
 | `cast_values` | `True` | Convert strings to int, float, bool where possible |
 
 **`load_env(path, *, cast_values)`** — convenience wrapper to load a `.env` file directly. `cast_values` defaults to `False`.
+
+---
+
+### Config validation
+
+```python
+from infrakit.core.config import validate, Schema, field
+from pydantic import BaseModel
+
+# Pydantic model
+class AppConfig(BaseModel):
+    host: str
+    port: int
+    debug: bool = False
+
+result = validate({"host": "localhost", "port": 8080}, AppConfig)
+if result.ok:
+    cfg = result.data   # fully typed AppConfig instance
+
+# Lightweight dict schema (no Pydantic model needed)
+schema = Schema({
+    "host": field(str, required=True),
+    "port": field(int, required=True),
+    "debug": field(bool, required=False, default=False),
+})
+result = schema.validate({"host": "localhost", "port": 8080})
+```
+
+---
+
+### Config conversion and export
+
+```python
+from infrakit.core.config import convert_file, convert_dict, export_file, export_dict
+
+# Convert between formats
+convert_file("config.yaml", "config.ini")
+output, warnings = convert_dict(data, from_format="yaml", to_format="env")
+
+# Sanitize config for sharing (replaces all values with YOUR_VALUE_HERE)
+export_file("config.yaml", ".env.example", to_format="env")
+safe = export_dict({"PORT": 8080, "SECRET": "abc"}, to_format="env")
+```
 
 ---
 
@@ -98,6 +195,8 @@ log.info("started on port %d", 8080)
 ---
 
 ## LLM Client
+
+> Requires `pip install python-infrakit-dev[llm]`
 
 A unified client for **OpenAI** and **Gemini** with key rotation, rate limiting, quota tracking, and async/batch generation.
 

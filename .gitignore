@@ -19,3 +19,4 @@ new_requirements.txt
 config.ini
 testing.ipynb
 api_key_dir
+.claude/

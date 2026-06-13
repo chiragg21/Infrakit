@@ -49,6 +49,8 @@ from infrakit.scaffolder.generator import (
     _write,
     _config_content,
     _gitignore,
+    _infrakit_dep,
+    _pkg_dep,
     _logger_util,
     _src_init,
     _tests_init,
@@ -374,12 +376,19 @@ def test_runner_returns_all_stages():
 def _pipeline_pyproject(
     project_name: str, version: str, description: str, author: str, include_llm: bool
 ) -> str:
-    author_line = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
-    llm_deps = """\
-    "openai",
-    "google-generativeai",
-    "tqdm",
-""" if include_llm else ""
+    author_line  = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
+    infrakit_dep = _infrakit_dep()
+    pydantic_dep = _pkg_dep("pydantic")
+    openai_dep   = _pkg_dep("openai")
+    genai_dep    = _pkg_dep("google-genai")
+    groq_dep     = _pkg_dep("groq")
+    tqdm_dep     = _pkg_dep("tqdm")
+    llm_deps     = f'''\
+    "{openai_dep}",
+    "{genai_dep}",
+    "{groq_dep}",
+    "{tqdm_dep}",
+''' if include_llm else ""
     return f"""\
 [project]
 name        = "{project_name}"
@@ -392,8 +401,8 @@ authors = [
 ]
 
 dependencies = [
-    "infrakit",
-    "pydantic>=2.0",
+    {infrakit_dep},
+    "{pydantic_dep}",
 {llm_deps}]
 
 [project.optional-dependencies]

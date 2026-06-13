@@ -40,6 +40,8 @@ from infrakit.scaffolder.generator import (
     _write,
     _config_content,
     _gitignore,
+    _infrakit_dep,
+    _pkg_dep,
     _logger_util,
     _src_init,
     _tests_init,
@@ -124,9 +126,11 @@ def _load_keys() -> dict:
     # fall back to keys declared in the config file
     openai_key  = _cfg.get("OPENAI_API_KEY", "")
     gemini_key  = _cfg.get("GEMINI_API_KEY", "")
+    groq_key    = _cfg.get("GROQ_API_KEY", "")
     return {{
         "openai_keys": [openai_key] if openai_key else [],
         "gemini_keys": [gemini_key] if gemini_key else [],
+        "groq_keys":   [groq_key]   if groq_key   else [],
     }}
 
 
@@ -142,6 +146,7 @@ llm: LLMClient = LLMClient(
     max_concurrent=int(_cfg.get("LLM_CONCURRENCY", 3)),
     openai_model=_cfg.get("OPENAI_MODEL") or None,
     gemini_model=_cfg.get("GEMINI_MODEL") or None,
+    groq_model=_cfg.get("GROQ_MODEL") or None,
 )
 
 __all__ = ["llm", "Prompt"]
@@ -316,7 +321,8 @@ def _keys_json_template() -> str:
 {
   "_comment": "Fill in your API keys. Never commit this file — it is in .gitignore.",
   "openai_keys": [],
-  "gemini_keys":  []
+  "gemini_keys": [],
+  "groq_keys":   []
 }
 """
 
@@ -401,6 +407,12 @@ pytest
 
 def _ai_pyproject(project_name: str, version: str, description: str, author: str) -> str:
     author_line = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
+    infrakit_dep = _infrakit_dep()
+    openai_dep   = _pkg_dep("openai")
+    genai_dep    = _pkg_dep("google-genai")
+    groq_dep     = _pkg_dep("groq")
+    pydantic_dep = _pkg_dep("pydantic")
+    tqdm_dep     = _pkg_dep("tqdm")
     return f"""\
 [project]
 name        = "{project_name}"
@@ -413,11 +425,12 @@ authors = [
 ]
 
 dependencies = [
-    "infrakit",
-    "openai",
-    "google-genai",
-    "pydantic>=2.0",
-    "tqdm",
+    {infrakit_dep},
+    "{openai_dep}",
+    "{genai_dep}",
+    "{groq_dep}",
+    "{pydantic_dep}",
+    "{tqdm_dep}",
 ]
 
 [project.optional-dependencies]

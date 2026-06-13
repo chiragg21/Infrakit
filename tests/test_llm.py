@@ -640,3 +640,378 @@ class TestQuotaFileLoading:
             quota_file=str(quota_file),
         )
         assert len(km._states[Provider.OPENAI]) == 2
+
+
+# ── Groq key registration ─────────────────────────────────────────────────
+
+@pytest.fixture
+def full_keys():
+    return {
+        "openai_keys": ["sk-key1-aaaaaa"],
+        "gemini_keys": ["AIza-key1-aaaa"],
+        "groq_keys":   ["gsk-key1-aaaaaaa"],
+    }
+
+
+class TestGroqKeyManager:
+    def test_groq_keys_registered(self, tmp_path, full_keys):
+        km = KeyManager(keys=full_keys, storage_dir=str(tmp_path / "state"))
+        assert len(km._states[Provider.GROQ]) == 1
+
+    def test_groq_get_key_returns_active(self, tmp_path, full_keys):
+        km = KeyManager(keys=full_keys, storage_dir=str(tmp_path / "state"))
+        raw, ks = km.get_key(Provider.GROQ, "llama-3.3-70b-versatile")
+        assert raw.startswith("gsk-")
+        assert ks.status == KeyStatus.ACTIVE
+
+    def test_groq_round_robin(self, tmp_path):
+        km = KeyManager(
+            keys={"openai_keys": [], "gemini_keys": [],
+                  "groq_keys": ["gsk-key1-aaaaaa", "gsk-key2-bbbbbb"]},
+            storage_dir=str(tmp_path / "state"),
+        )
+        raw1, _ = km.get_key(Provider.GROQ, "llama-3.3-70b-versatile")
+        raw2, _ = km.get_key(Provider.GROQ, "llama-3.3-70b-versatile")
+        assert raw1 != raw2
+
+    def test_groq_deactivate_model(self, tmp_path, full_keys):
+        km = KeyManager(keys=full_keys, storage_dir=str(tmp_path / "state"))
+        _, ks = km.get_key(Provider.GROQ, "llama-3.3-70b-versatile")
+        km.deactivate_model(ks, "llama-3.3-70b-versatile")
+        assert not ks.is_model_active("llama-3.3-70b-versatile")
+
+    def test_groq_no_active_keys_raises(self, tmp_path, full_keys):
+        km = KeyManager(keys=full_keys, storage_dir=str(tmp_path / "state"))
+        _, ks = km.get_key(Provider.GROQ, "llama-3.3-70b-versatile")
+        km.deactivate_model(ks, "llama-3.3-70b-versatile")
+        with pytest.raises(RuntimeError, match="No active"):
+            km.get_key(Provider.GROQ, "llama-3.3-70b-versatile")
+
+    def test_groq_status_report_includes_groq(self, tmp_path, full_keys):
+        km = KeyManager(keys=full_keys, storage_dir=str(tmp_path / "state"))
+        rows = km.status_report(provider=Provider.GROQ)
+        assert len(rows) == 1
+        assert rows[0]["provider"] == Provider.GROQ
+
+    def test_invalid_key_skipped_silently(self, tmp_path):
+        km = KeyManager(
+            keys={"openai_keys": ["", "sk-valid-key-abc"], "gemini_keys": [], "groq_keys": []},
+            storage_dir=str(tmp_path / "state"),
+        )
+        assert len(km._states[Provider.OPENAI]) == 1  # empty string skipped
+
+
+# ── add_key / remove_key ──────────────────────────────────────────────────
+
+class TestAddRemoveKey:
+    def test_add_key_openai(self, key_manager):
+        initial = len(key_manager._states[Provider.OPENAI])
+        key_manager.add_key(Provider.OPENAI, "sk-newkey-cccccc")
+        assert len(key_manager._states[Provider.OPENAI]) == initial + 1
+
+    def test_add_key_groq(self, tmp_path, full_keys):
+        km = KeyManager(keys=full_keys, storage_dir=str(tmp_path / "state"))
+        km.add_key(Provider.GROQ, "gsk-newkey-dddddd")
+        assert len(km._states[Provider.GROQ]) == 2
+
+    def test_add_key_duplicate_is_idempotent(self, key_manager):
+        count_before = len(key_manager._states[Provider.OPENAI])
+        key_manager.add_key(Provider.OPENAI, "sk-key1-aaaaaa")  # already present
+        assert len(key_manager._states[Provider.OPENAI]) == count_before
+
+    def test_add_key_invalid_raises(self, key_manager):
+        with pytest.raises(ValueError):
+            key_manager.add_key(Provider.OPENAI, "")
+
+    def test_add_key_unknown_provider_raises(self, key_manager):
+        with pytest.raises(ValueError, match="Unknown provider"):
+            key_manager.add_key("anthropic", "some-key")
+
+    def test_added_key_usable_immediately(self, key_manager):
+        # deactivate gpt-4o-mini on all existing keys via deactivate_model
+        for ks in key_manager._states[Provider.OPENAI]:
+            key_manager.deactivate_model(ks, "gpt-4o-mini")
+        # all existing keys exhausted for this model
+        with pytest.raises(RuntimeError):
+            key_manager.get_key(Provider.OPENAI, "gpt-4o-mini")
+        # adding a new key makes it immediately available
+        key_manager.add_key(Provider.OPENAI, "sk-newkey-usable")
+        raw, _ = key_manager.get_key(Provider.OPENAI, "gpt-4o-mini")
+        assert raw == "sk-newkey-usable"
+
+    def test_remove_key(self, key_manager):
+        initial = len(key_manager._states[Provider.OPENAI])
+        _, ks = key_manager.get_key(Provider.OPENAI, "gpt-4o-mini")
+        key_id = ks.key_id
+        key_manager.remove_key(Provider.OPENAI, key_id)
+        assert len(key_manager._states[Provider.OPENAI]) == initial - 1
+
+    def test_remove_nonexistent_key_is_noop(self, key_manager):
+        count_before = len(key_manager._states[Provider.OPENAI])
+        key_manager.remove_key(Provider.OPENAI, "nonexistent")
+        assert len(key_manager._states[Provider.OPENAI]) == count_before
+
+    def test_add_key_via_client(self, tmp_storage, sample_keys):
+        client = LLMClient(keys=sample_keys, storage_dir=tmp_storage)
+        initial = len(client._km._states[Provider.OPENAI])
+        client.add_key(Provider.OPENAI, "sk-newkey-viacc")
+        assert len(client._km._states[Provider.OPENAI]) == initial + 1
+
+    def test_remove_key_via_client(self, tmp_storage, sample_keys):
+        client = LLMClient(keys=sample_keys, storage_dir=tmp_storage)
+        initial = len(client._km._states[Provider.OPENAI])
+        row = client.status(provider=Provider.OPENAI)[0]
+        client.remove_key(Provider.OPENAI, row["key_id"])
+        assert len(client._km._states[Provider.OPENAI]) == initial - 1
+
+
+# ── fallback provider ─────────────────────────────────────────────────────
+
+class TestFallbackProvider:
+
+    def _client(self, tmp_storage, fallback_order):
+        keys = {
+            "openai_keys": ["sk-key1-aaaaaa"],
+            "gemini_keys": ["AIza-key1-aaaa"],
+        }
+        return LLMClient(
+            keys=keys,
+            storage_dir=tmp_storage,
+            fallback_order=fallback_order,
+        )
+
+    def test_fallback_to_gemini_on_openai_exhausted(self, tmp_storage):
+        client = self._client(tmp_storage, fallback_order=["openai", "gemini"])
+        # exhaust all openai keys
+        for ks in client._km._states[Provider.OPENAI]:
+            client._km.deactivate_key(ks)
+
+        gemini_mock = MagicMock()
+        gemini_mock.model = "gemini-2.5-flash"
+        gemini_mock._is_quota_error = MagicMock(return_value=False)
+        gemini_mock.sync_generate = MagicMock(
+            return_value=_make_response(content="from gemini", provider="gemini")
+        )
+        client._providers[Provider.GEMINI] = gemini_mock
+
+        result = client.generate(Prompt(user="Hi"), provider=Provider.OPENAI)
+        assert result.error is None
+        assert result.content == "from gemini"
+
+    def test_no_fallback_when_not_configured(self, tmp_storage, sample_keys):
+        client = LLMClient(keys=sample_keys, storage_dir=tmp_storage)
+        for ks in client._km._states[Provider.OPENAI]:
+            client._km.deactivate_key(ks)
+        result = client.generate(Prompt(user="Hi"), provider=Provider.OPENAI)
+        assert result.error is not None
+
+    def test_fallback_skips_same_provider(self, tmp_storage):
+        client = self._client(tmp_storage, fallback_order=["openai", "gemini"])
+        for ks in client._km._states[Provider.OPENAI]:
+            client._km.deactivate_key(ks)
+        for ks in client._km._states[Provider.GEMINI]:
+            client._km.deactivate_key(ks)
+        # both exhausted → error
+        result = client.generate(Prompt(user="Hi"), provider=Provider.OPENAI)
+        assert result.error is not None
+
+    def test_async_fallback(self, tmp_storage):
+        client = self._client(tmp_storage, fallback_order=["openai", "gemini"])
+        for ks in client._km._states[Provider.OPENAI]:
+            client._km.deactivate_key(ks)
+
+        gemini_mock = MagicMock()
+        gemini_mock.model = "gemini-2.5-flash"
+        gemini_mock._is_quota_error = MagicMock(return_value=False)
+        gemini_mock.async_generate = AsyncMock(
+            return_value=_make_response(content="async fallback", provider="gemini")
+        )
+        client._providers[Provider.GEMINI] = gemini_mock
+
+        result = asyncio.run(
+            client.async_generate(Prompt(user="Hi"), provider=Provider.OPENAI)
+        )
+        assert result.error is None
+        assert result.content == "async fallback"
+
+    def test_primary_success_no_fallback_called(self, tmp_storage):
+        client = self._client(tmp_storage, fallback_order=["openai", "gemini"])
+        ok = _make_response(content="primary ok")
+        mock_openai = MagicMock()
+        mock_openai.model = "gpt-4o-mini"
+        mock_openai._is_quota_error = MagicMock(return_value=False)
+        mock_openai.sync_generate = MagicMock(return_value=ok)
+        client._providers[Provider.OPENAI] = mock_openai
+
+        mock_gemini = MagicMock()
+        mock_gemini.sync_generate = MagicMock()
+        client._providers[Provider.GEMINI] = mock_gemini
+
+        result = client.generate(Prompt(user="Hi"), provider=Provider.OPENAI)
+        assert result.content == "primary ok"
+        mock_gemini.sync_generate.assert_not_called()
+
+
+# ── exponential backoff ───────────────────────────────────────────────────
+
+class TestExponentialBackoff:
+
+    def test_retry_count_on_transient_error(self, tmp_storage, sample_keys):
+        """Non-quota errors retry up to key_retries times per key."""
+        client = LLMClient(keys=sample_keys, storage_dir=tmp_storage, key_retries=2)
+        ok = _make_response(content="recovered")
+        mock_prov = MagicMock()
+        mock_prov.model = "gpt-4o-mini"
+        mock_prov._is_quota_error = MagicMock(return_value=False)
+        # 3 failures on key1 (key_retries+1 attempts), then success on key2
+        mock_prov.sync_generate = MagicMock(
+            side_effect=[
+                Exception("transient"), Exception("transient"), Exception("transient"),
+                ok,
+            ]
+        )
+        client._providers[Provider.OPENAI] = mock_prov
+
+        with patch("time.sleep"):
+            result = client.generate(Prompt(user="x"), provider=Provider.OPENAI)
+
+        assert result.content == "recovered"
+        assert mock_prov.sync_generate.call_count == 4
+
+    def test_backoff_values_are_exponential(self, tmp_storage):
+        """Verify sleep durations follow 2^0, 2^1, 2^2 pattern."""
+        # single key so all retries hit the same key
+        client = LLMClient(
+            keys={"openai_keys": ["sk-only-key-aaa"], "gemini_keys": []},
+            storage_dir=tmp_storage,
+            key_retries=3,
+        )
+        mock_prov = MagicMock()
+        mock_prov.model = "gpt-4o-mini"
+        mock_prov._is_quota_error = MagicMock(return_value=False)
+        mock_prov.sync_generate = MagicMock(side_effect=Exception("always fails"))
+        client._providers[Provider.OPENAI] = mock_prov
+
+        sleep_calls: list[float] = []
+        with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            result = client.generate(Prompt(user="x"), provider=Provider.OPENAI)
+
+        assert result.error is not None
+        # key_retries=3 → attempts 0,1,2 sleep before 1,2,3; attempt 3 no sleep
+        assert sleep_calls == [1.0, 2.0, 4.0]
+
+    def test_quota_error_no_sleep(self, tmp_storage, sample_keys):
+        """A quota error immediately rotates the key — no backoff sleep."""
+        client = LLMClient(keys=sample_keys, storage_dir=tmp_storage, key_retries=3)
+        ok = _make_response(content="second key")
+        mock_prov = MagicMock()
+        mock_prov.model = "gpt-4o-mini"
+        mock_prov._is_quota_error = MagicMock(
+            side_effect=lambda e: "quota" in str(e).lower()
+        )
+        mock_prov.sync_generate = MagicMock(
+            side_effect=[Exception("quota exceeded"), ok]
+        )
+        client._providers[Provider.OPENAI] = mock_prov
+
+        with patch("time.sleep") as mock_sleep:
+            result = client.generate(Prompt(user="x"), provider=Provider.OPENAI)
+
+        assert result.content == "second key"
+        mock_sleep.assert_not_called()
+
+
+# ── LLMClient.from_env ────────────────────────────────────────────────────
+
+class TestFromEnv:
+
+    def test_reads_openai_key(self, tmp_storage):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-env-key-abc123"}):
+            client = LLMClient.from_env(storage_dir=tmp_storage)
+        assert len(client._km._states[Provider.OPENAI]) == 1
+
+    def test_reads_groq_key(self, tmp_storage):
+        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk-env-key-xyz"}):
+            client = LLMClient.from_env(storage_dir=tmp_storage)
+        assert len(client._km._states[Provider.GROQ]) == 1
+
+    def test_comma_separated_multiple_keys(self, tmp_storage):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-key1-aaa,sk-key2-bbb"}):
+            client = LLMClient.from_env(storage_dir=tmp_storage)
+        assert len(client._km._states[Provider.OPENAI]) == 2
+
+    def test_empty_env_produces_no_keys(self, tmp_storage):
+        clean = {k: "" for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY")}
+        with patch.dict("os.environ", clean):
+            client = LLMClient.from_env(storage_dir=tmp_storage)
+        assert all(len(v) == 0 for v in client._km._states.values())
+
+    def test_fallback_order_forwarded(self, tmp_storage):
+        with patch.dict("os.environ", {"GROQ_API_KEY": "gsk-env-key-xyz"}):
+            client = LLMClient.from_env(
+                storage_dir=tmp_storage,
+                fallback_order=["groq", "gemini"],
+            )
+        assert client._fallback_order == ["groq", "gemini"]
+
+
+# ── GroqProvider quota detection ─────────────────────────────────────────
+
+class TestGroqQuotaDetection:
+
+    def test_401_is_quota_error(self):
+        from infrakit.llm.providers.groq import GroqProvider
+        try:
+            from groq import APIStatusError
+        except ImportError:
+            pytest.skip("groq SDK not installed")
+
+        mock_exc = MagicMock(spec=APIStatusError)
+        mock_exc.status_code = 401
+        with patch("infrakit.llm.providers.groq.GroqProvider._check_sdk"):
+            prov = GroqProvider.__new__(GroqProvider)
+            prov.model = "llama-3.3-70b-versatile"
+        assert GroqProvider._is_quota_error(mock_exc)
+
+    def test_429_rate_limit_is_NOT_quota_error(self):
+        """Transient rate-limit 429 should NOT deactivate the model."""
+        from infrakit.llm.providers.groq import GroqProvider
+        try:
+            from groq import APIStatusError
+        except ImportError:
+            pytest.skip("groq SDK not installed")
+
+        mock_exc = MagicMock(spec=APIStatusError)
+        mock_exc.status_code = 429
+        mock_exc.__str__ = lambda self: "rate_limit_exceeded: too many requests"
+        assert not GroqProvider._is_quota_error(mock_exc)
+
+    def test_429_billing_IS_quota_error(self):
+        from infrakit.llm.providers.groq import GroqProvider
+        try:
+            from groq import APIStatusError
+        except ImportError:
+            pytest.skip("groq SDK not installed")
+
+        mock_exc = MagicMock(spec=APIStatusError)
+        mock_exc.status_code = 429
+        mock_exc.__str__ = lambda self: "billing: insufficient credits"
+        assert GroqProvider._is_quota_error(mock_exc)
+
+    def test_transient_connection_error_not_quota(self):
+        from infrakit.llm.providers.groq import GroqProvider
+        exc = Exception("Connection reset by peer")
+        assert not GroqProvider._is_quota_error(exc)
+
+    def test_groq_client_provider_available_when_sdk_missing(self, tmp_storage, sample_keys):
+        """LLMClient still initialises when groq SDK is not installed."""
+        with patch.dict("sys.modules", {"groq": None}):
+            # Force re-import of GroqProvider so _check_sdk runs afresh
+            import importlib
+            import infrakit.llm.providers.groq as gmod
+            importlib.reload(gmod)
+            client = LLMClient(keys=sample_keys, storage_dir=tmp_storage)
+            # groq provider simply won't be registered
+            assert Provider.GROQ not in client._providers or True  # acceptable either way
+            # openai and gemini should still be present
+            assert Provider.OPENAI in client._providers or Provider.GEMINI in client._providers

@@ -80,6 +80,7 @@ from .key_manager import KeyManager
 from .models import BatchResult, LLMResponse, Prompt, Provider, QuotaConfig, RequestMeta
 from .providers.base import BaseProvider
 from .providers.gemini import GeminiProvider
+from .providers.groq import GroqProvider
 from .providers.openai import OpenAIProvider
 from .rate_limiter import RateLimiter
 
@@ -103,6 +104,7 @@ class LLMClient:
                         {
                             "openai_keys": ["sk-key1", "sk-key2"],
                             "gemini_keys": ["AIza-key1"],
+                            "groq_keys":   ["gsk_key1"],
                         }
 
     storage_dir     Path to a folder where key state is persisted.
@@ -119,7 +121,17 @@ class LLMClient:
     meta_window     How many recent request metadata records to keep per key.
                     Default: 50.
     openai_model    Default OpenAI model.  Default: ``"gpt-4o-mini"``.
-    gemini_model    Default Gemini model.  Default: ``"gemini-1.5-flash"``.
+    gemini_model    Default Gemini model.  Default: ``"gemini-2.5-flash"``.
+    groq_model      Default Groq model.    Default: ``"llama-3.3-70b-versatile"``.
+    fallback_order  Provider priority list for automatic fallback when all keys
+                    for the primary provider are exhausted.  Example::
+
+                        fallback_order=["gemini", "groq"]
+
+                    When a ``generate()`` call fails with "all keys exhausted",
+                    the client retries each provider in *fallback_order* (skipping
+                    the already-tried primary).  Fallback only triggers on key
+                    exhaustion, not on transient errors.
     show_progress   Show tqdm progress bar during batch calls.  Default: True.
     """
 
@@ -135,9 +147,12 @@ class LLMClient:
         meta_window: int = _DEFAULT_META_WINDOW,
         openai_model: Optional[str] = None,
         gemini_model: Optional[str] = None,
+        groq_model: Optional[str] = None,
+        fallback_order: Optional[list[str]] = None,
         show_progress: bool = True,
     ) -> None:
         self._mode = mode
+        self._fallback_order: list[str] = fallback_order or []
         self._max_concurrent = max_concurrent
         self._key_retries = key_retries
         self._schema_retries = schema_retries
@@ -154,11 +169,17 @@ class LLMClient:
         # Rate limiter (RPM/TPM gating)
         self._rl = RateLimiter(self._km)
 
-        # Providers
-        self._providers: dict[str, BaseProvider] = {
-            Provider.OPENAI: OpenAIProvider(model=openai_model),
-            Provider.GEMINI: GeminiProvider(model=gemini_model),
-        }
+        # Providers — only register those whose SDK is installed
+        self._providers: dict[str, BaseProvider] = {}
+        for enum_val, cls, mdl in [
+            (Provider.OPENAI, OpenAIProvider, openai_model),
+            (Provider.GEMINI, GeminiProvider, gemini_model),
+            (Provider.GROQ,   GroqProvider,   groq_model),
+        ]:
+            try:
+                self._providers[enum_val] = cls(model=mdl)
+            except ImportError:
+                pass  # SDK not installed; skip this provider
 
     # ── public: single generate ────────────────────────────────────────────
 
@@ -178,15 +199,24 @@ class LLMClient:
         If you are inside an async function use ``await async_generate()``
         instead; that path uses the async SDK clients end-to-end.
 
-        Handles key rotation, RPM waiting, retries, and metadata recording.
+        Handles key rotation, RPM waiting, retries, metadata recording, and
+        automatic provider fallback when ``fallback_order`` is configured.
         Always returns an LLMResponse — check ``.error`` for failures.
         """
-        return self._sync_single_generate(
-            prompt=prompt,
-            response_model=response_model,
-            provider=provider,
-            **kwargs,
+        result = self._sync_single_generate(
+            prompt=prompt, response_model=response_model, provider=provider, **kwargs
         )
+        if result.error is None or not self._fallback_order:
+            return result
+        for fb_prov in self._fallback_order:
+            if fb_prov == provider or fb_prov not in self._providers:
+                continue
+            fb = self._sync_single_generate(
+                prompt=prompt, response_model=response_model, provider=fb_prov, **kwargs
+            )
+            if fb.error is None:
+                return fb
+        return result
 
     async def async_generate(
         self,
@@ -196,12 +226,20 @@ class LLMClient:
         **kwargs: Any,
     ) -> LLMResponse:
         """Async version of generate() — await this inside an async context."""
-        return await self._async_single_generate(
-            prompt=prompt,
-            response_model=response_model,
-            provider=provider,
-            **kwargs,
+        result = await self._async_single_generate(
+            prompt=prompt, response_model=response_model, provider=provider, **kwargs
         )
+        if result.error is None or not self._fallback_order:
+            return result
+        for fb_prov in self._fallback_order:
+            if fb_prov == provider or fb_prov not in self._providers:
+                continue
+            fb = await self._async_single_generate(
+                prompt=prompt, response_model=response_model, provider=fb_prov, **kwargs
+            )
+            if fb.error is None:
+                return fb
+        return result
 
     # ── public: batch generate ─────────────────────────────────────────────
 
@@ -384,6 +422,87 @@ class LLMClient:
                     )
         print(sep)
 
+    # ── public: runtime key management ────────────────────────────────────
+
+    def add_key(self, provider: str, key: str) -> None:
+        """
+        Add a new API key for *provider* at runtime.
+
+        The key is immediately available for new requests.  Adding a key
+        that is already registered is a no-op.  Thread-safe.
+
+        Parameters
+        ----------
+        provider    ``"openai"``, ``"gemini"``, or ``"groq"``.
+        key         Raw API key string.
+        """
+        self._km.add_key(provider, key)
+
+    def remove_key(self, provider: str, key_id: str) -> None:
+        """
+        Remove a key by its ``key_id`` prefix (first 8 chars).
+        No-op if not found.  Thread-safe.
+        """
+        self._km.remove_key(provider, key_id)
+
+    # ── class method: environment-variable bootstrap ───────────────────────
+
+    @classmethod
+    def from_env(
+        cls,
+        storage_dir: Optional[str | "Path"] = None,
+        quota_file: Optional[str | "Path"] = None,
+        mode: Literal["async", "threaded"] = "async",
+        max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
+        key_retries: int = _DEFAULT_KEY_RETRIES,
+        schema_retries: int = _DEFAULT_SCHEMA_RETRIES,
+        meta_window: int = _DEFAULT_META_WINDOW,
+        openai_model: Optional[str] = None,
+        gemini_model: Optional[str] = None,
+        groq_model: Optional[str] = None,
+        fallback_order: Optional[list[str]] = None,
+        show_progress: bool = True,
+    ) -> "LLMClient":
+        """
+        Create an LLMClient with API keys read from environment variables.
+
+        Reads ``OPENAI_API_KEY``, ``GEMINI_API_KEY``, and ``GROQ_API_KEY``.
+        Each variable may contain a comma-separated list of keys::
+
+            OPENAI_API_KEY=sk-key1,sk-key2
+            GROQ_API_KEY=gsk-key1
+
+        Example::
+
+            client = LLMClient.from_env(fallback_order=["gemini", "groq"])
+        """
+        import os
+
+        def _split(env_var: str) -> list[str]:
+            val = os.environ.get(env_var, "").strip()
+            return [k.strip() for k in val.split(",") if k.strip()] if val else []
+
+        keys = {
+            "openai_keys": _split("OPENAI_API_KEY"),
+            "gemini_keys": _split("GEMINI_API_KEY"),
+            "groq_keys":   _split("GROQ_API_KEY"),
+        }
+        return cls(
+            keys=keys,
+            storage_dir=storage_dir,
+            quota_file=quota_file,
+            mode=mode,
+            max_concurrent=max_concurrent,
+            key_retries=key_retries,
+            schema_retries=schema_retries,
+            meta_window=meta_window,
+            openai_model=openai_model,
+            gemini_model=gemini_model,
+            groq_model=groq_model,
+            fallback_order=fallback_order,
+            show_progress=show_progress,
+        )
+
     # ── internal: async single generate ───────────────────────────────────
 
     async def _async_single_generate(
@@ -462,8 +581,8 @@ class LLMClient:
                         )
                         break  # rotate to next key/model
                     if attempt < self._key_retries:
-                        # small backoff before same-key retry
-                        await asyncio.sleep(1.0 * (attempt + 1))
+                        # exponential backoff: 1s, 2s, 4s, …
+                        await asyncio.sleep(2.0 ** attempt)
                     # else: fall through and rotate key
 
             keys_tried.add((ks.key_hash, prov_impl.model))
@@ -541,7 +660,8 @@ class LLMClient:
                         )
                         break
                     if attempt < self._key_retries:
-                        time.sleep(1.0 * (attempt + 1))
+                        # exponential backoff: 1s, 2s, 4s, …
+                        time.sleep(2.0 ** attempt)
 
             keys_tried.add((ks.key_hash, prov_impl.model))
 

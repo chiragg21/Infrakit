@@ -20,7 +20,7 @@ from .models import (
     QuotaConfig,
     RequestMeta,
 )
-from .providers import GeminiProvider, OpenAIProvider
+from .providers import GeminiProvider, GroqProvider, OpenAIProvider
 
 __all__ = [
     "LLMClient",
@@ -32,4 +32,5 @@ __all__ = [
     "Provider",
     "OpenAIProvider",
     "GeminiProvider",
+    "GroqProvider",
 ]

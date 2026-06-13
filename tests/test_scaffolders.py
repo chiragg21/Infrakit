@@ -8,7 +8,9 @@ Run with:  uv run pytest tests/test_scaffolders.py -v
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -493,3 +495,126 @@ class TestScaffoldResult:
         p = tmp_path / "proj"
         result = scaffold_basic(p)
         assert result.project_dir == p
+
+
+# ---------------------------------------------------------------------------
+# Package name and version correctness
+# ---------------------------------------------------------------------------
+
+class TestScaffoldPackageNames:
+    """Every generated pyproject.toml must use python-infrakit-dev, not infrakit."""
+
+    def _toml(self, tmp_path, scaffolder, **kwargs) -> str:
+        p = tmp_path / "proj"
+        scaffolder(p, **kwargs)
+        return (p / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_basic_uses_python_infrakit_dev(self, tmp_path):
+        toml = self._toml(tmp_path, scaffold_basic)
+        assert "python-infrakit-dev" in toml
+        assert '"infrakit"' not in toml
+        assert "'infrakit'" not in toml
+
+    def test_ai_uses_python_infrakit_dev(self, tmp_path):
+        toml = self._toml(tmp_path, scaffold_ai)
+        assert "python-infrakit-dev" in toml
+
+    def test_backend_uses_python_infrakit_dev(self, tmp_path):
+        toml = self._toml(tmp_path, scaffold_backend)
+        assert "python-infrakit-dev" in toml
+
+    def test_cli_tool_uses_python_infrakit_dev(self, tmp_path):
+        toml = self._toml(tmp_path, scaffold_cli_tool)
+        assert "python-infrakit-dev" in toml
+
+    def test_pipeline_uses_python_infrakit_dev(self, tmp_path):
+        toml = self._toml(tmp_path, scaffold_pipeline)
+        assert "python-infrakit-dev" in toml
+
+    def test_pyproject_has_version_pin(self, tmp_path):
+        """The infrakit dep should contain >= when the package is installed."""
+        from infrakit.scaffolder.generator import _get_infrakit_version
+        ver = _get_infrakit_version()
+        if not ver:
+            pytest.skip("python-infrakit-dev version not determinable in this env")
+        toml = self._toml(tmp_path, scaffold_basic)
+        assert f"python-infrakit-dev>={ver}" in toml
+
+    def test_versioned_deps_contain_operator(self, tmp_path):
+        """The _pkg_dep helper must return a >=X.Y.Z string when version known."""
+        from infrakit.scaffolder.generator import _pkg_dep, _version_cache
+        # seed cache with a known version so no HTTP call is made
+        _version_cache["test-package-xyz"] = "1.2.3"
+        dep = _pkg_dep("test-package-xyz")
+        assert dep == "test-package-xyz>=1.2.3"
+
+    def test_versioned_deps_no_version_fallback(self, tmp_path):
+        """When version is unknown _pkg_dep returns just the package name."""
+        from infrakit.scaffolder.generator import _pkg_dep, _version_cache
+        _version_cache["unknown-package-abc"] = ""
+        dep = _pkg_dep("unknown-package-abc")
+        assert dep == "unknown-package-abc"
+
+
+# ---------------------------------------------------------------------------
+# Groq config in scaffolded projects
+# ---------------------------------------------------------------------------
+
+class TestScaffoldGroqConfig:
+    """Groq must appear in generated LLM config and keys templates."""
+
+    def test_keys_json_has_groq_keys(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_ai(p)
+        data = json.loads((p / "keys.json").read_text(encoding="utf-8"))
+        assert "groq_keys" in data
+
+    def test_basic_env_has_groq_api_key_when_llm_included(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_basic(p, include_llm=True)
+        env = _read(p, ".env")
+        assert "GROQ_API_KEY" in env
+
+    def test_ai_env_has_groq_api_key(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_ai(p)
+        env = _read(p, ".env")
+        assert "GROQ_API_KEY" in env
+
+    def test_backend_env_has_groq_api_key(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_backend(p)
+        env = _read(p, ".env")
+        assert "GROQ_API_KEY" in env
+
+    def test_pipeline_env_has_groq_when_llm(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_pipeline(p, include_llm=True)
+        env = _read(p, ".env")
+        assert "GROQ_API_KEY" in env
+
+    def test_llm_util_handles_groq_key(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_ai(p)
+        src = _read(p, "utils/llm.py")
+        assert "groq_keys" in src
+        assert "GROQ_API_KEY" in src
+        assert "groq_model" in src
+
+    def test_ai_pyproject_includes_groq(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_ai(p)
+        toml = _read(p, "pyproject.toml")
+        assert "groq" in toml
+
+    def test_backend_pyproject_includes_groq(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_backend(p)
+        toml = _read(p, "pyproject.toml")
+        assert "groq" in toml
+
+    def test_no_llm_env_does_not_have_groq_key(self, tmp_path):
+        p = tmp_path / "proj"
+        scaffold_basic(p, include_llm=False)
+        env = _read(p, ".env")
+        assert "GROQ_API_KEY" not in env

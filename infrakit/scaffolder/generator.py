@@ -63,6 +63,58 @@ def _mkdir(result: ScaffoldResult, path: Path) -> None:
     result.entries.append(ScaffoldEntry(path=path, status="created", kind="dir"))
 
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_version_cache: dict[str, str] = {}
+
+
+def _get_package_version(pkg_name: str) -> str:
+    """
+    Return the installed or latest-PyPI version of *pkg_name*.
+
+    Tries ``importlib.metadata`` first (fast, no network), then falls back
+    to a PyPI API call.  Results are cached in-process.
+    """
+    if pkg_name in _version_cache:
+        return _version_cache[pkg_name]
+
+    ver = ""
+    try:
+        from importlib.metadata import version
+        ver = version(pkg_name)
+    except Exception:
+        pass
+
+    if not ver:
+        try:
+            import json
+            import urllib.request
+            url = f"https://pypi.org/pypi/{pkg_name}/json"
+            with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
+                ver = json.loads(resp.read())["info"]["version"]
+        except Exception:
+            pass
+
+    _version_cache[pkg_name] = ver
+    return ver
+
+
+def _get_infrakit_version() -> str:
+    return _get_package_version("python-infrakit-dev")
+
+
+def _infrakit_dep() -> str:
+    """Return the versioned dependency string for python-infrakit-dev."""
+    ver = _get_infrakit_version()
+    return f'"python-infrakit-dev>={ver}"' if ver else '"python-infrakit-dev"'
+
+
+def _pkg_dep(pkg_name: str) -> str:
+    """Return a versioned dep string like ``openai>=1.2.3`` or just ``openai``."""
+    ver = _get_package_version(pkg_name)
+    return f"{pkg_name}>={ver}" if ver else pkg_name
+
+
 # ── template content ──────────────────────────────────────────────────────────
 
 def _pyproject_toml(
@@ -72,6 +124,7 @@ def _pyproject_toml(
     author: str,
 ) -> str:
     author_line = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
+    infrakit_dep = _infrakit_dep()
     return f"""\
 [project]
 name        = "{project_name}"
@@ -84,7 +137,7 @@ authors = [
 ]
 
 dependencies = [
-    "infrakit",
+    {infrakit_dep},
 ]
 
 [project.optional-dependencies]
@@ -96,10 +149,12 @@ dev = [
 
 
 def _requirements_txt(project_name: str) -> str:
+    ver = _get_infrakit_version()
+    dep = f"python-infrakit-dev>={ver}" if ver else "python-infrakit-dev"
     return f"""\
 # requirements.txt — {project_name}
 # Add your dependencies below.
-infrakit
+{dep}
 """
 
 
@@ -110,10 +165,12 @@ def _env_config(include_llm: bool = False) -> str:
 LLM_KEYS_FILE=keys.json
 OPENAI_API_KEY=
 GEMINI_API_KEY=
+GROQ_API_KEY=
 LLM_MODE=async
 LLM_CONCURRENCY=3
 # OPENAI_MODEL=gpt-4o
 # GEMINI_MODEL=gemini-2.0-flash
+# GROQ_MODEL=llama-3.3-70b-versatile
 # LLM_STATE_DIR=
 # LLM_QUOTA_FILE=
 """ if include_llm else ""
@@ -139,10 +196,12 @@ def _yaml_config(include_llm: bool = False) -> str:
 LLM_KEYS_FILE: keys.json
 OPENAI_API_KEY: ""
 GEMINI_API_KEY: ""
+GROQ_API_KEY: ""
 LLM_MODE: async
 LLM_CONCURRENCY: 3
 # OPENAI_MODEL: gpt-4o
 # GEMINI_MODEL: gemini-2.0-flash
+# GROQ_MODEL: llama-3.3-70b-versatile
 # LLM_STATE_DIR: ""
 # LLM_QUOTA_FILE: ""
 """ if include_llm else ""
@@ -167,6 +226,7 @@ def _json_config(include_llm: bool = False) -> str:
   "LLM_KEYS_FILE": "keys.json",
   "OPENAI_API_KEY": "",
   "GEMINI_API_KEY": "",
+  "GROQ_API_KEY": "",
   "LLM_MODE": "async",
   "LLM_CONCURRENCY": 3""" if include_llm else ""
     return f"""\

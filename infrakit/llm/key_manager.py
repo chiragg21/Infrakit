@@ -210,7 +210,7 @@ class KeyManager:
 
     Parameters
     ----------
-    keys            ``{"openai_keys": [...], "gemini_keys": [...]}``.
+    keys            ``{"openai_keys": [...], "gemini_keys": [...], "groq_keys": [...]}``.
     storage_dir     Folder where ``key_state.json`` is written.
                     Defaults to ``~/.infrakit/llm/``.
     quota_file      Path to a JSON quota definition file.
@@ -237,7 +237,7 @@ class KeyManager:
         self._storage_path = storage_path / _STATE_FILE
 
         # quota file: explicit arg > default location > skip
-        if quota_file is not None:
+        if quota_file is not None and str(quota_file).strip():
             self._quota_file: Optional[Path] = Path(quota_file)
         elif (DEFAULT_LLM_DIR / _QUOTA_FILE).exists():
             self._quota_file = DEFAULT_LLM_DIR / _QUOTA_FILE
@@ -252,20 +252,25 @@ class KeyManager:
         self._states: dict[str, list[KeyState]] = {
             Provider.OPENAI: [],
             Provider.GEMINI: [],
+            Provider.GROQ:   [],
         }
         self._rr_index: dict[str, dict[str, int]] = {
             # per-provider, per-model round-robin index
             Provider.OPENAI: {},
             Provider.GEMINI: {},
+            Provider.GROQ:   {},
         }
 
         provider_map = {
             "openai_keys": Provider.OPENAI,
             "gemini_keys": Provider.GEMINI,
+            "groq_keys":   Provider.GROQ,
         }
 
         for key_field, provider in provider_map.items():
             for raw_key in keys.get(key_field, []):
+                if not raw_key or not isinstance(raw_key, str):
+                    continue  # skip invalid entries
                 key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
                 key_id   = raw_key[:8]
 
@@ -428,6 +433,52 @@ class KeyManager:
                 ks.model_states["__all__"] = sentinel
             self._persist()
 
+    # ── public: runtime key management ────────────────────────────────────
+
+    def add_key(self, provider: str, raw_key: str) -> None:
+        """
+        Add a new API key at runtime without re-initialising the client.
+
+        The key becomes immediately available for new requests.
+        Adding a key that is already registered is a no-op (idempotent).
+        Thread-safe.
+        """
+        import hashlib
+
+        if not raw_key or not isinstance(raw_key, str):
+            raise ValueError(
+                f"Invalid API key for {provider!r}: must be a non-empty string."
+            )
+        if provider not in self._states:
+            raise ValueError(
+                f"Unknown provider {provider!r}. "
+                f"Valid options: {list(self._states)}"
+            )
+
+        with self._lock:
+            key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+            if any(ks.key_hash == key_hash for ks in self._states[provider]):
+                return  # already registered
+            key_id = raw_key[:8]
+            ks = KeyState(provider=provider, key_id=key_id, key_hash=key_hash)
+            ks._raw_key = raw_key  # type: ignore[attr-defined]
+            self._states[provider].append(ks)
+            self._persist()
+
+    def remove_key(self, provider: str, key_id: str) -> None:
+        """
+        Remove a key by its ``key_id`` prefix (first 8 chars).
+        No-op if the key is not found.  Thread-safe.
+        """
+        with self._lock:
+            before = len(self._states.get(provider, []))
+            self._states[provider] = [
+                ks for ks in self._states.get(provider, [])
+                if ks.key_id != key_id
+            ]
+            if len(self._states[provider]) < before:
+                self._persist()
+
     # ── public: quota config ───────────────────────────────────────────────
 
     def set_quota(
@@ -553,11 +604,11 @@ class KeyManager:
         """Auto-reactivate a model if its daily reset hour has passed."""
         if ms.status != ModelStatus.INACTIVE or ms.deactivated_at is None:
             return
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         reset_today = now_utc.replace(
             hour=ms.reset_hour_utc, minute=0, second=0, microsecond=0
         )
-        deactivated_dt = datetime.datetime.utcfromtimestamp(ms.deactivated_at)
+        deactivated_dt = datetime.datetime.fromtimestamp(ms.deactivated_at, datetime.timezone.utc)
         if deactivated_dt < reset_today <= now_utc:
             ms.status         = ModelStatus.ACTIVE
             ms.deactivated_at = None
@@ -571,11 +622,11 @@ class KeyManager:
 
     def _maybe_reset_day(self, ms: ModelState) -> None:
         """Reset daily token counter if the reset hour has passed today."""
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         reset_today = now_utc.replace(
             hour=ms.reset_hour_utc, minute=0, second=0, microsecond=0
         )
-        day_start_dt = datetime.datetime.utcfromtimestamp(ms.day_start_epoch)
+        day_start_dt = datetime.datetime.fromtimestamp(ms.day_start_epoch, datetime.timezone.utc)
         if day_start_dt < reset_today <= now_utc:
             ms.day_token_total = 0
             ms.day_start_epoch = time.time()

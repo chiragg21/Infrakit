@@ -48,6 +48,8 @@ from infrakit.scaffolder.generator import (
     _mkdir,
     _write,
     _gitignore,
+    _infrakit_dep,
+    _pkg_dep,
     _logger_util,
     _src_init,
     _tests_init,
@@ -64,10 +66,12 @@ def _backend_env_config(project_name: str, include_llm: bool) -> str:
 LLM_KEYS_FILE=keys.json
 OPENAI_API_KEY=
 GEMINI_API_KEY=
+GROQ_API_KEY=
 LLM_MODE=async
 LLM_CONCURRENCY=3
 # OPENAI_MODEL=gpt-4o
 # GEMINI_MODEL=gemini-2.0-flash
+# GROQ_MODEL=llama-3.3-70b-versatile
 """ if include_llm else ""
     return f"""\
 # Application
@@ -96,10 +100,12 @@ def _backend_yaml_config(project_name: str, include_llm: bool) -> str:
 LLM_KEYS_FILE: keys.json
 OPENAI_API_KEY: ""
 GEMINI_API_KEY: ""
+GROQ_API_KEY: ""
 LLM_MODE: async
 LLM_CONCURRENCY: 3
 # OPENAI_MODEL: gpt-4o
 # GEMINI_MODEL: gemini-2.0-flash
+# GROQ_MODEL: llama-3.3-70b-versatile
 """ if include_llm else ""
     return f"""\
 # Application configuration
@@ -127,6 +133,7 @@ def _backend_json_config(project_name: str, include_llm: bool) -> str:
   "LLM_KEYS_FILE": "keys.json",
   "OPENAI_API_KEY": "",
   "GEMINI_API_KEY": "",
+  "GROQ_API_KEY": "",
   "LLM_MODE": "async",
   "LLM_CONCURRENCY": 3""" if include_llm else ""
     return f"""\
@@ -195,6 +202,7 @@ class Settings(BaseSettings):
     # optional: LLM keys (override ~/.infrakit/llm/ defaults)
     openai_api_key: str  = ""
     gemini_api_key: str  = ""
+    groq_api_key: str    = ""
     llm_mode: str        = "async"
     llm_concurrency: int = 3
 
@@ -448,7 +456,16 @@ services:
 def _backend_pyproject(
     project_name: str, version: str, description: str, author: str
 ) -> str:
-    author_line = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
+    author_line  = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
+    infrakit_dep = _infrakit_dep()
+    fastapi_dep  = _pkg_dep("fastapi")
+    uvicorn_dep  = _pkg_dep("uvicorn")
+    pydantic_dep = _pkg_dep("pydantic")
+    pydset_dep   = _pkg_dep("pydantic-settings")
+    openai_dep   = _pkg_dep("openai")
+    genai_dep    = _pkg_dep("google-genai")
+    groq_dep     = _pkg_dep("groq")
+    tqdm_dep     = _pkg_dep("tqdm")
     return f"""\
 [project]
 name        = "{project_name}"
@@ -461,14 +478,15 @@ authors = [
 ]
 
 dependencies = [
-    "infrakit",
-    "fastapi>=0.110",
-    "uvicorn[standard]",
-    "pydantic>=2.0",
-    "pydantic-settings",
-    "openai",
-    "google-generativeai",
-    "tqdm",
+    {infrakit_dep},
+    "{fastapi_dep}",
+    "{uvicorn_dep}[standard]",
+    "{pydantic_dep}",
+    "{pydset_dep}",
+    "{openai_dep}",
+    "{genai_dep}",
+    "{groq_dep}",
+    "{tqdm_dep}",
 ]
 
 [project.optional-dependencies]

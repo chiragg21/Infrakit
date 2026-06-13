@@ -40,6 +40,8 @@ from infrakit.scaffolder.generator import (
     _write,
     _config_content,
     _gitignore,
+    _infrakit_dep,
+    _pkg_dep,
     _logger_util,
     _src_init,
     _tests_init,
@@ -199,13 +201,21 @@ def test_hello_name():
 def _cli_pyproject(
     project_name: str, version: str, description: str, author: str, include_llm: bool
 ) -> str:
-    author_line = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
-    cmd         = project_name.replace("_", "-")
-    llm_deps    = """\
-    "openai",
-    "google-generativeai",
-    "tqdm",
-""" if include_llm else ""
+    author_line  = f'    "{author}",' if author else '    # "Your Name <you@example.com>",'
+    cmd          = project_name.replace("_", "-")
+    infrakit_dep = _infrakit_dep()
+    typer_dep    = _pkg_dep("typer")
+    pydantic_dep = _pkg_dep("pydantic")
+    openai_dep   = _pkg_dep("openai")
+    genai_dep    = _pkg_dep("google-genai")
+    groq_dep     = _pkg_dep("groq")
+    tqdm_dep     = _pkg_dep("tqdm")
+    llm_deps     = f'''\
+    "{openai_dep}",
+    "{genai_dep}",
+    "{groq_dep}",
+    "{tqdm_dep}",
+''' if include_llm else ""
     return f"""\
 [project]
 name        = "{project_name}"
@@ -218,9 +228,9 @@ authors = [
 ]
 
 dependencies = [
-    "infrakit",
-    "typer[all]",
-    "pydantic>=2.0",
+    {infrakit_dep},
+    "{typer_dep}[all]",
+    "{pydantic_dep}",
 {llm_deps}]
 
 [project.optional-dependencies]

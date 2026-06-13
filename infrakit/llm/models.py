@@ -19,6 +19,7 @@ from pydantic import BaseModel
 class Provider(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
+    GROQ   = "groq"
 
 
 class KeyStatus(str, Enum):

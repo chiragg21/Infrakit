@@ -6,6 +6,37 @@ A modular developer toolkit for Python — project scaffolding, logging, config 
 
 ---
 
+## Architecture
+
+```
+infrakit/
+  core/config/   load · validate · convert · export      (env · yaml · json · ini)
+  core/logger/   setup · get_logger                       (rotation · retention · json/human)
+  llm/           LLMClient -- OpenAI + Gemini · key rotation · quota tracking ·
+                 Pydantic structured output · async / threaded batch generation
+  deps/          scan · export · check · clean · optimise (declared-vs-actual imports,
+                 security / license / outdated checks)
+  scaffolder/    init templates: basic · backend · ai · pipeline · cli_tool
+  time/          pipeline_profiler · track                (step-level latency)
+  cli            `infrakit` / `ik` -- thin wrapper over every subpackage
+```
+
+Each subpackage is independent and optional — install the core, or add `[llm]` / `[all]` extras as needed.
+
+---
+
+## Features
+
+- **Scaffolding** — bootstrap a project from 5 templates (`basic`, `backend`, `ai`, `pipeline`, `cli_tool`), each with a pre-wired config file.
+- **Config** — load `.env` / YAML / JSON / INI with `${VAR}` interpolation and type casting; validate via Pydantic or a lightweight `Schema`; convert between formats and export sanitized samples.
+- **Logging** — one-call `setup()` with date/size rotation, retention, session-scoped filenames, and human or JSON output.
+- **LLM client** — OpenAI + Gemini with key rotation, rate limiting, **quota tracking persisted across restarts**, **Pydantic structured output** (with schema retries), and async / threaded **batch** generation.
+- **Dependency tools** — scan actually-imported packages, sync `pyproject.toml` / `requirements.txt`, check outdated / security / licenses, find unused installed packages, and optimise imports.
+- **Profiling** — pipeline-level and step-level latency instrumentation via decorators.
+- **CLI** — every subpackage is exposed through `infrakit` / `ik`.
+
+---
+
 ## Installation
 
 **Core** — scaffolding, config, logging, deps, profiling, and CLI:
